@@ -26,6 +26,8 @@ export type Awaiting =
   | "main-checkout"
   | "merge"
   | "worktree-remove"
+  | "push"
+  | "handoff-push"
   | "nothing";
 
 export interface OrchestratorState {
@@ -47,6 +49,7 @@ export type Action =
   | { type: "abortMerge" }
   | { type: "removeWorktree"; worktree: string }
   | { type: "deleteBranch"; branch: string }
+  | { type: "pushBranch"; remote: string; branch: string }
   | { type: "notify"; message: string };
 
 export type OrchestratorEvent =
@@ -55,6 +58,7 @@ export type OrchestratorEvent =
   | { type: "mainCheckout"; porcelain: string; branch: string }
   | ({ type: "mergeDone" } & ({ ok: true } | { ok: false; error: string; inProgress: boolean }))
   | { type: "worktreeRemoved"; ok: boolean; output: string }
+  | ({ type: "pushDone" } & ({ ok: true } | { ok: false; error: string }))
   | { type: "approve" }
   | { type: "rework"; note: string; k: number };
 
@@ -63,7 +67,7 @@ export interface Transition {
   actions: Action[];
 }
 
-export function startJob(input: { id: string; feature: string; repo: string }): Transition {
+export function startJob(input: { id: string; feature: string; repo: string; push?: string }): Transition {
   const slash = input.repo.lastIndexOf("/");
   const parent = input.repo.slice(0, slash);
   const name = input.repo.slice(slash + 1);
@@ -76,6 +80,7 @@ export function startJob(input: { id: string; feature: string; repo: string }): 
     round: 0,
     reviews: pendingReviews(),
   };
+  if (input.push !== undefined) job.push = input.push;
   return {
     state: { repo: input.repo, job, resumes: 0, awaiting: "worktree" },
     actions: [
@@ -124,6 +129,12 @@ export function transition(state: OrchestratorState, event: OrchestratorEvent): 
     case "worktree-remove":
       if (event.type === "worktreeRemoved") return onWorktreeRemoved(state, event.ok, event.output);
       break;
+    case "push":
+      if (event.type === "pushDone") return onPushDone(state, event);
+      break;
+    case "handoff-push":
+      if (event.type === "pushDone") return onHandoffPushDone(state, event);
+      break;
     case "nothing":
       break;
   }
@@ -157,15 +168,19 @@ function stop(state: OrchestratorState, reason: string): Transition {
 }
 
 // SKILL.md "Needs human": quote decision.md, or build.md for BLOCKED.
+// With a push remote, the branch is pushed after the handoff, so the human gets it on the remote too.
 function needsHuman(state: OrchestratorState, reason: string, quote: string, before: Action[] = []): Transition {
   const next = { ...withJob(state, { stage: "needs-human" }), awaiting: "nothing" as const };
+  const actions: Action[] = [
+    ...before,
+    { type: "writeJob", job: next.job },
+    notify(next, `needs a human, ${reason}. Worktree: ${next.job.worktree}\n\n${quote}`),
+  ];
+  const { push } = next.job;
+  if (push === undefined) return { state: next, actions };
   return {
-    state: next,
-    actions: [
-      ...before,
-      { type: "writeJob", job: next.job },
-      notify(next, `needs a human, ${reason}. Worktree: ${next.job.worktree}\n\n${quote}`),
-    ],
+    state: { ...next, awaiting: "handoff-push" },
+    actions: [...actions, { type: "pushBranch", remote: push, branch: next.job.branch }],
   };
 }
 
@@ -299,7 +314,15 @@ function onDecision(state: OrchestratorState, content: string | null): Transitio
 }
 
 // SKILL.md "Merge": the main checkout must be clean (backlog.md exempt) and on main first.
+// A job with a push remote pushes its branch instead and is not merged locally.
 function startMerge(state: OrchestratorState): Transition {
+  const { push, branch } = state.job;
+  if (push !== undefined) {
+    return {
+      state: { ...state, awaiting: "push" },
+      actions: [notify(state, `approved → pushing ${branch} to ${push}`), { type: "pushBranch", remote: push, branch }],
+    };
+  }
   return {
     state: { ...state, awaiting: "main-checkout" },
     actions: [notify(state, "approved → merging into main"), { type: "checkMainCheckout" }],
@@ -364,6 +387,28 @@ function onWorktreeRemoved(state: OrchestratorState, ok: boolean, output: string
       notify(next, `merged into main, but git worktree remove failed: ${output}`),
     ],
   };
+}
+
+// An approved job's push: pushed is terminal, and the worktree and local branch are kept.
+function onPushDone(state: OrchestratorState, result: { ok: true } | { ok: false; error: string }): Transition {
+  if (result.ok) {
+    const next = { ...withJob(state, { stage: "pushed" }), awaiting: "nothing" as const };
+    return {
+      state: next,
+      actions: [{ type: "writeJob", job: next.job }, notify(next, `pushed ${next.job.branch} to ${next.job.push}`)],
+    };
+  }
+  const next = { ...withJob(state, { stage: "needs-human" }), awaiting: "nothing" as const };
+  return {
+    state: next,
+    actions: [{ type: "writeJob", job: next.job }, notify(next, `needs a human, push failed: ${result.error}`)],
+  };
+}
+
+// The push after a needs-human handoff only notifies: the job stays in needs-human either way.
+function onHandoffPushDone(state: OrchestratorState, result: { ok: true } | { ok: false; error: string }): Transition {
+  const message = result.ok ? `pushed ${state.job.branch} to ${state.job.push}` : `push failed: ${result.error}`;
+  return { state: { ...state, awaiting: "nothing" }, actions: [notify(state, message)] };
 }
 
 function isHandedToHuman(state: OrchestratorState): boolean {

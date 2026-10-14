@@ -121,6 +121,26 @@ describe("run and next with DATABASE_URL", () => {
     expect(sh(repo, "worktree", "list").trim().split("\n")).toHaveLength(1);
   });
 
+  it("run --push stores the remote in job.json and the saved row", async () => {
+    const repo = makeRepo();
+    execFileSync("git", ["init", "-q", "--bare", join(repo, "..", "remote.git")]);
+    sh(repo, "remote", "add", "origin", join(repo, "..", "remote.git"));
+    const { code, out, err } = await cli(["run", "--push", "origin", "hello"], repo, { databaseUrl: DATABASE_URL });
+    expect(err).toEqual([]);
+    expect(code).toBe(0);
+    expect(out).toEqual(["001-hello: queued"]);
+    expect(readJob(repo, "001-hello")).toMatchObject({ stage: "spec", feature: "hello", push: "origin" });
+    expect(rows.get(`${repo}\n001-hello`)?.state.job.push).toBe("origin");
+  });
+
+  it("run --push with an unknown remote enqueues nothing", async () => {
+    const repo = makeRepo();
+    const { code, out, err } = await cli(["run", "--push", "nosuch", "hello"], repo, { databaseUrl: DATABASE_URL });
+    expect({ code, out, err }).toEqual({ code: 1, out: [], err: ["fabrica: no remote named nosuch"] });
+    expect(sent).toEqual([]);
+    expect(rows.size).toBe(0);
+  });
+
   it("run picks the next number when the folder is taken", async () => {
     const repo = makeRepo();
     mkdirSync(join(repo, "factory", "jobs", "001-x"), { recursive: true });

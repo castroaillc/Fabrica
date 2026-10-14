@@ -68,6 +68,7 @@ indent, double quotes, semicolons, ES modules, `import type` for types).
 
 ```bash
 fabrica run <feature...>            # /factory <feature>
+fabrica run --push <remote> <feature...>  # the same, but push the branch instead of merging
 fabrica next                        # /factory next
 fabrica approve <job-id>            # /factory approve <job-id>
 fabrica rework <job-id> <note...>   # /factory rework <job-id> <note>
@@ -80,6 +81,18 @@ With `DATABASE_URL` set, `run` and `next` don't run the job: they create it
 `<id>: queued` and exit. A `fabrica worker` started in the same repo picks it
 up. `approve` and `rework` still run in-process and also update the job store.
 Without `DATABASE_URL` every command runs in-process as before.
+
+`fabrica run --push <remote> <feature...>` (`--push` only directly after
+`run`) pushes `factory/<job-id>` to `<remote>`, which must be a remote name
+listed by `git remote`, when the job reaches needs-human or is approved. An
+approved job ends at stage `pushed` and is not merged locally; its worktree and
+local branch are kept. A needs-human job stays at `needs-human` whether the
+push worked or not. The remote is stored as `push` in `job.json`, so `approve`
+on such a job pushes instead of merging, `rework` keeps it, and it works with
+`DATABASE_URL` and `fabrica worker` too. The push is always
+`git push <remote> refs/heads/factory/<job-id>:refs/heads/factory/<job-id>`: it
+never force-pushes and never pushes the default branch, so a diverged remote
+branch sends the job to needs-human.
 
 Run it from inside the target repo (the repo is `git rev-parse --show-toplevel`
 of the current directory) as `node <fabrica>/apps/cli/bin/fabrica.js <command>`,

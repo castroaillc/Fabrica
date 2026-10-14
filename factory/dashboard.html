@@ -51,7 +51,7 @@
 
   /* Board */
   .board {
-    display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); gap: 12px;
+    display: grid; grid-template-columns: repeat(7, minmax(0, 1fr)); gap: 12px;
     padding: 20px 32px 40px; align-items: start;
   }
   .col { min-width: 0; }
@@ -64,7 +64,7 @@
   .col-head .count {
     margin-left: auto; font-family: var(--mono); font-size: 11px; color: var(--muted);
   }
-  .col:not(:last-child):not(:nth-last-child(2)) .col-head::after {
+  .col:not(:last-child):not(:nth-last-child(2)):not(:nth-last-child(3)) .col-head::after {
     content: "›"; position: absolute; right: -10px; top: -2px; color: var(--faint); font-size: 16px;
   }
   .col.human .col-head { border-bottom-color: color-mix(in srgb, var(--human) 55%, transparent); }
@@ -271,6 +271,7 @@ const STAGES = [
   { key: 'review', label: 'Review', who: 'sec · ux · ui · code' },
   { key: 'approve', label: 'Approve', who: 'approver · opus' },
   { key: 'merged', label: 'Merged', who: 'main', cls: 'merged-col' },
+  { key: 'pushed', label: 'Pushed', who: 'remote', cls: 'merged-col' },
   { key: 'needs-human', label: 'Needs human', who: 'approve · rework', cls: 'human' },
 ]
 const LIVE = new Set(['spec', 'build', 'review', 'approve'])
@@ -343,7 +344,7 @@ function card(job, past) {
   if (job.round > 0) rows.push(chips(job.round, job.reviews, job.stage === 'review'))
   const [num, ...slug] = job.id.split('-')
   return `
-    <button class="card ${live ? 'live' : ''} ${human ? 'human' : ''} ${job.stage === 'merged' ? 'merged' : ''}"
+    <button class="card ${live ? 'live' : ''} ${human ? 'human' : ''} ${job.stage === 'merged' || job.stage === 'pushed' ? 'merged' : ''}"
             data-job="${esc(job.id)}">
       <div class="card-top">
         ${live ? '<span class="pulse" aria-label="running"></span>' : ''}
