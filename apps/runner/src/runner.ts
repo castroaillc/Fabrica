@@ -2,7 +2,7 @@
 // Each entry point runs actions in order and feeds every outcome back through transition until awaiting "nothing".
 import { mkdir, readFile, readdir } from "node:fs/promises";
 import { join, resolve } from "node:path";
-import { nextReworkNumber, parseAgentDirectory, startJob, stateFromJob, transition } from "@fabrica/core";
+import { STAGES, nextReworkNumber, parseAgentDirectory, startJob, stateFromJob, transition } from "@fabrica/core";
 import type {
   Action,
   AgentDefinition,
@@ -80,7 +80,16 @@ async function loadAgents(repo: string): Promise<Record<string, AgentDefinition>
 async function loadState(ctx: Context): Promise<OrchestratorState> {
   const file = join(jobFolder(ctx.repo, ctx.id), "job.json");
   const job = JSON.parse(await readFile(file, "utf8")) as JobState;
-  if (job.id !== ctx.id) throw new Error(`${ctx.id}: ${file} has id ${JSON.stringify(job.id)}`);
+  // branch and worktree reach git argv and the agents' cwd, so they must be the values startJob gives this repo and id.
+  const expected = startJob({ id: ctx.id, feature: job.feature, repo: ctx.repo }).state.job;
+  const reject = (field: string, value: unknown): never => {
+    throw new Error(`${ctx.id}: ${file} has ${field} ${JSON.stringify(value)}`);
+  };
+  if (job.id !== ctx.id) reject("id", job.id);
+  if (job.branch !== expected.branch) reject("branch", job.branch);
+  if (job.worktree !== expected.worktree) reject("worktree", job.worktree);
+  if (!Number.isInteger(job.round) || job.round < 0) reject("round", job.round);
+  if (!(STAGES as readonly unknown[]).includes(job.stage)) reject("stage", job.stage);
   return stateFromJob(job, ctx.repo);
 }
 
@@ -143,14 +152,14 @@ async function execute(ctx: Context, state: OrchestratorState, actions: Action[]
         track(running, Promise.resolve(await checkMainCheckout(ctx)));
         break;
       case "merge": {
-        const merge = await git(["merge", "--no-ff", action.branch, "-m", action.message], repo);
+        const merge = await git(["merge", "--no-ff", "-m", action.message, "--end-of-options", action.branch], repo);
         const event: OrchestratorEvent = merge.ok
           ? { type: "mergeDone", ok: true }
           : {
               type: "mergeDone",
               ok: false,
               error: merge.error,
-              inProgress: (await git(["rev-parse", "-q", "--verify", "MERGE_HEAD"], repo)).ok,
+              inProgress: (await git(["rev-parse", "-q", "--verify", "--end-of-options", "MERGE_HEAD"], repo)).ok,
             };
         track(running, Promise.resolve(event));
         break;
@@ -161,13 +170,13 @@ async function execute(ctx: Context, state: OrchestratorState, actions: Action[]
         break;
       }
       case "removeWorktree": {
-        const remove = await git(["worktree", "remove", action.worktree], repo);
+        const remove = await git(["worktree", "remove", "--end-of-options", action.worktree], repo);
         const output = remove.ok ? `${remove.stdout}${remove.stderr}`.trim() : remove.error;
         track(running, Promise.resolve({ type: "worktreeRemoved", ok: remove.ok, output }));
         break;
       }
       case "deleteBranch": {
-        const remove = await git(["branch", "-d", action.branch], repo);
+        const remove = await git(["branch", "-d", "--end-of-options", action.branch], repo);
         if (!remove.ok) options.notify(`${id}: git branch -d ${action.branch} failed: ${remove.error}`);
         break;
       }
@@ -221,7 +230,7 @@ async function callAgent(
 }
 
 async function createWorktree(ctx: Context, branch: string, worktree: string): Promise<OrchestratorEvent> {
-  const add = await git(["worktree", "add", "-b", branch, worktree, "main"], ctx.repo);
+  const add = await git(["worktree", "add", "-b", branch, "--end-of-options", worktree, "main"], ctx.repo);
   if (!add.ok) return { type: "worktreeCreated", ok: false, error: add.error };
   const [command, ...args] = ctx.options.setup ?? [];
   if (command !== undefined) {

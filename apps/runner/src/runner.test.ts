@@ -399,4 +399,31 @@ describe("reworkJob", () => {
     await expect(approveJob(options(repo, executor).options, ID)).rejects.toThrow(/has id/);
     expect(existsSync(join(folder(repo), "rework-1.md"))).toBe(false);
   });
+
+  it.each([
+    ["branch", { branch: "main" }],
+    ["branch", { branch: "--delete" }],
+    ["worktree", { worktree: "/tmp/elsewhere" }],
+    ["worktree", { worktree: "../app-factory/003-x" }],
+    ["round", { round: -1 }],
+    ["round", { round: 1.5 }],
+    ["round", { round: "1" }],
+    ["stage", { stage: "shipped" }],
+  ])("rejects a job.json with a bad %s before touching git or agents", async (field, change) => {
+    const repo = makeRepo();
+    const first = fake(repo, { build: () => "STATUS: BLOCKED\n" });
+    const blocked = await runJob(options(repo, first.executor).options, { id: ID, feature: "Do X" });
+    const json = `${JSON.stringify({ ...blocked, ...change })}\n`;
+    writeFileSync(join(folder(repo), "job.json"), json);
+    const main = sh(repo, "rev-parse", "main");
+    const { executor, calls } = fake(repo);
+    const pattern = new RegExp(`has ${field} `);
+    await expect(reworkJob(options(repo, executor).options, ID, "note")).rejects.toThrow(pattern);
+    await expect(approveJob(options(repo, executor).options, ID)).rejects.toThrow(pattern);
+    expect(calls).toHaveLength(0);
+    expect(existsSync(join(folder(repo), "rework-1.md"))).toBe(false);
+    expect(readFileSync(join(folder(repo), "job.json"), "utf8")).toBe(json);
+    expect(sh(repo, "rev-parse", "main")).toBe(main);
+    expect(existsSync(worktreeOf(repo))).toBe(true);
+  });
 });
