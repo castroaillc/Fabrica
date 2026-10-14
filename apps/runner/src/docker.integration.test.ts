@@ -19,6 +19,7 @@ function imageBuilt(): boolean {
 }
 
 const ID = "003-x";
+const OTHER = "004-y";
 const temps: string[] = [];
 afterEach(() => {
   for (const dir of temps.splice(0)) rmSync(dir, { recursive: true, force: true });
@@ -29,7 +30,7 @@ function sh(cwd: string, ...args: string[]): string {
 }
 
 describe.skipIf(!imageBuilt())("a job container from fabrica/job", () => {
-  it("sees only the worktree, job folder and git common dir, and no host env", { timeout: 120_000 }, async () => {
+  it("sees only the worktree, job folder and git common dir, mostly read-only, and no host env", { timeout: 120_000 }, async () => {
     const root = realpathSync(mkdtempSync(join(tmpdir(), "fabrica-docker-it-")));
     temps.push(root);
     const repo = join(root, "app");
@@ -42,6 +43,7 @@ describe.skipIf(!imageBuilt())("a job container from fabrica/job", () => {
     sh(repo, "commit", "-q", "-m", "Initial");
     const worktree = join(root, "app-factory", ID);
     sh(repo, "worktree", "add", "-q", "-b", `factory/${ID}`, worktree, "main");
+    sh(repo, "worktree", "add", "-q", "-b", `factory/${OTHER}`, join(root, "app-factory", OTHER), "main");
     const folder = join(repo, "factory", "jobs", ID);
     mkdirSync(folder, { recursive: true });
 
@@ -87,21 +89,30 @@ describe.skipIf(!imageBuilt())("a job container from fabrica/job", () => {
 
       await shell(`test ! -e ${repo}/README.md`);
 
-      // The git config, hooks and worktree links the host's git reads later are read-only in the container.
+      // The common dir is read-only apart from what the commit above wrote, and so are this job's worktree links:
+      // nothing the host's git reads later can be planted, including a commondir that redirects the main checkout.
       const git = join(repo, ".git");
       const gitDir = join(git, "worktrees", ID);
+      const other = join(git, "worktrees", OTHER);
       for (const target of [
         join(git, "config"),
+        join(git, "config.worktree"),
+        join(git, "commondir"),
         join(git, "hooks", "post-merge"),
         join(git, "info", "attributes"),
         join(worktree, ".git"),
         join(gitDir, "commondir"),
         join(gitDir, "gitdir"),
+        join(gitDir, "config.worktree"),
+        join(other, "commondir"),
+        join(other, "gitdir"),
       ]) {
         const write = await exec(["sh", "-c", `echo planted >> ${target}`]);
         expect(write.ok, `${target} is writable`).toBe(false);
       }
       expect(readFileSync(join(git, "config"), "utf8")).not.toContain("planted");
+      expect(existsSync(join(git, "commondir"))).toBe(false);
+      expect(readFileSync(join(other, "commondir"), "utf8")).not.toContain("planted");
       await shell(`test ! -e ${homedir()}/.claude && test ! -e "$HOME/.claude"`);
 
       const printed = await exec(["node", "-e", "console.log(JSON.stringify(process.env))"]);

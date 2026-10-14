@@ -127,7 +127,7 @@ describe("dockerExecutor", () => {
     expect(fake.execs.map((exec) => exec.container)).toEqual(names);
   });
 
-  it("mounts exactly the worktree, the job folder and the git common dir, at their host paths", async () => {
+  it("mounts the worktree, the job folder and the git common dir at their host paths, the common dir read-only", async () => {
     const { repo, worktree } = makeRepo();
     const fake = fakeLauncher();
     const { executor } = dockerExecutor({ launcher: fake.launcher, env: HOST_ENV });
@@ -139,14 +139,18 @@ describe("dockerExecutor", () => {
     expect(spec?.mounts).toEqual([
       same(worktree(ID)),
       same(join(repo, "factory", "jobs", ID)),
-      same(common),
-      // Read-only overlays inside those mounts, so an agent can't plant git config or hooks the host later runs.
-      readOnly(join(common, "config")),
-      readOnly(join(common, "hooks")),
-      readOnly(join(common, "info")),
+      // Read-only, so an agent can't plant git config, hooks or a commondir file the host later reads.
+      readOnly(common),
+      // Only what a commit writes is writable.
+      same(join(common, "objects")),
+      same(join(common, "refs")),
+      same(join(common, "logs")),
+      same(join(common, "worktrees", ID)),
+      // This job's worktree links stay read-only inside its writable git dir.
       readOnly(join(worktree(ID), ".git")),
       readOnly(join(common, "worktrees", ID, "commondir")),
       readOnly(join(common, "worktrees", ID, "gitdir")),
+      readOnly(join(common, "worktrees", ID, "config.worktree")),
     ]);
     expect(spec?.image).toBe("fabrica/job");
     expect(spec?.user).toBe(`${process.getuid?.()}:${process.getgid?.()}`);
@@ -254,7 +258,7 @@ describe("dockerExecutor", () => {
     expect(create.slice(create.indexOf("--user"), create.indexOf("--user") + 2)).toEqual(["--user", spec.user]);
     const mounts = create.flatMap((arg, i) => (create[i - 1] === "--mount" ? [arg] : []));
     expect(mounts).toHaveLength(spec.mounts.length);
-    expect(mounts.filter((mount) => !mount.endsWith(',"readonly"'))).toHaveLength(3);
+    expect(mounts.filter((mount) => !mount.endsWith(',"readonly"'))).toHaveLength(6);
     expect(create.filter((arg) => arg === "-v" || arg === "--volume")).toEqual([]);
     expect(create.slice(-3)).toEqual(["fabrica/job", "sleep", "infinity"]);
     const names = exec.flatMap((arg, i) => (exec[i - 1] === "-e" ? [arg] : []));
@@ -331,6 +335,14 @@ describe("dockerExecutor", () => {
     );
     expect(fake.ensured).toEqual([]);
     expect(fake.execs).toEqual([]);
+  });
+
+  it("refuses a cwd that is not a linked worktree, whose git dir is the common dir", async () => {
+    const { repo } = makeRepo();
+    const fake = fakeLauncher();
+    const { executor } = dockerExecutor({ launcher: fake.launcher, env: HOST_ENV });
+    await expect(executor(callFor(repo, repo))).rejects.toThrow(`${repo} is not a linked worktree`);
+    expect(fake.ensured).toEqual([]);
   });
 
   it("tears down by removing the job's container", async () => {

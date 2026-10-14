@@ -1,10 +1,12 @@
 // Docker mode: every agent call runs in one container per job, launched from the fabrica/job image (images/job/).
-// The container sees the job's worktree, job folder and git common dir at their host paths, with the git config,
-// hooks and worktree links read-only, and nothing else of the host: no host env, no ~/.claude, no database
+// The container sees the job's worktree, job folder and git common dir at their host paths. The common dir is
+// read-only except for what a commit writes (objects, refs, logs and this job's worktree git dir), and the job's
+// worktree links are read-only too. Nothing else of the host reaches it: no host env, no ~/.claude, no database
 // credentials. Model credentials reach it only as exec env vars.
 import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
 import { existsSync } from "node:fs";
+import { mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import type { ProviderConfig } from "@fabrica/core";
 import { providerEnv } from "@fabrica/core";
@@ -201,10 +203,7 @@ export function dockerExecutor(config: DockerConfig): DockerMode {
       throw new Error(`${name}: cannot find the git dirs of ${call.cwd}: ${dirs.error}`);
     }
     const container = containerName(call.jobFolder, call.jobId);
-    const mounts = [
-      ...[call.cwd, call.jobFolder, common].map((path) => ({ source: path, target: path })),
-      ...readOnlyGitPaths(call.cwd, gitDir, common).map((path) => ({ source: path, target: path, readOnly: true })),
-    ];
+    const mounts = await gitMounts(call.cwd, call.jobFolder, gitDir, common);
     await launcher.ensure({ name: container, image, mounts, user: hostUser() });
     const options = sdkQueryOptions(call, {});
     delete options.env;
@@ -224,18 +223,24 @@ export function dockerExecutor(config: DockerConfig): DockerMode {
   return { executor, teardown };
 }
 
-// Read-only overlays inside the mounts: the host runs git in the repo after agents finish, so an agent must not be
-// able to plant config (fsmonitor, filters, hooksPath), hooks or attributes, or repoint the worktree's git dirs.
-function readOnlyGitPaths(worktree: string, gitDir: string, common: string): string[] {
-  const paths = [
-    join(common, "config"),
-    join(common, "hooks"),
-    join(common, "info"),
-    join(worktree, ".git"),
-    join(gitDir, "commondir"),
-    join(gitDir, "gitdir"),
+// The host runs git in the repo after agents finish, so an agent must not be able to plant config (fsmonitor,
+// filters, hooksPath), hooks, attributes or a commondir file, or repoint any worktree's git dirs. The common dir is
+// read-only, with read-write mounts only for what a commit writes; this job's worktree links stay read-only.
+async function gitMounts(worktree: string, folder: string, gitDir: string, common: string): Promise<Mount[]> {
+  if (gitDir === common) throw new Error(`${worktree} is not a linked worktree`);
+  const writable = ["objects", "refs", "logs"].map((dir) => join(common, dir));
+  // A missing directory can't be mounted, and git needs logs/ to record the commit's reflog.
+  for (const dir of writable) await mkdir(dir, { recursive: true });
+  // With extensions.worktreeConfig the host's git reads config.worktree in worktree remove's status check, so it
+  // exists (empty when it didn't) to be mounted read-only.
+  await writeFile(join(gitDir, "config.worktree"), "", { flag: "a" });
+  const readOnly = [join(worktree, ".git"), ...["commondir", "gitdir", "config.worktree"].map((file) => join(gitDir, file))];
+  return [
+    ...[worktree, folder].map((path) => ({ source: path, target: path })),
+    { source: common, target: common, readOnly: true },
+    ...[...writable, gitDir].map((path) => ({ source: path, target: path })),
+    ...readOnly.filter((path) => existsSync(path)).map((path) => ({ source: path, target: path, readOnly: true })),
   ];
-  return paths.filter((path) => existsSync(path));
 }
 
 function hostUser(): string {

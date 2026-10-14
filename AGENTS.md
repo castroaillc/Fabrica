@@ -167,29 +167,35 @@ its first agent call from `fabrica/job`, idles, and runs each call as
 uid:gid, without `--privileged`. Only the orchestrator's agent calls move into
 it: worktrees, merges and job.json stay on the host.
 
-Mounts, read-write at the same path as on the host, and nothing else (no rest
-of the main checkout, no home directory, `~/.claude`, `~/.gitconfig` or Docker
+Mounts, each at the same path as on the host, and nothing else (no rest of
+the main checkout, no home directory, `~/.claude`, `~/.gitconfig` or Docker
 socket):
 
-- the job's worktree,
-- the job folder `<repo>/factory/jobs/<id>/`,
-- the repo's git common dir (`<repo>/.git`), which git in a worktree needs.
+- read-write: the job's worktree and the job folder `<repo>/factory/jobs/<id>/`;
+- read-only: the repo's git common dir (`<repo>/.git`), which git in a
+  worktree needs;
+- read-write inside it, only what a commit writes: `objects/`, `refs/`,
+  `logs/` and the job's own `worktrees/<id>/`;
+- read-only again inside that: its `commondir`, `gitdir` and
+  `config.worktree` (created empty when missing), and the worktree's `.git`
+  file.
 
-Inside those, the files that host git reads and runs commands from are mounted
-read-only, when they exist:
-
-- the common dir's `config`, `hooks/` and `info/`;
-- the worktree's `.git` file;
-- `<repo>/.git/worktrees/<id>/commondir` and `gitdir`.
+So an agent cannot write the repo's `config`, `hooks/`, `info/`, a
+`commondir` file or another job's `worktrees/<other-id>/`. A builder's commit
+works; `git gc` and anything else that rewrites `packed-refs` or `config` in
+the container fails. Docker mode needs the main checkout's `.git` to be a
+directory.
 
 The runner also runs its own host git in Docker mode (status, merge, worktree
-add and remove, branch) with `-c core.fsmonitor=false -c core.hooksPath=/dev/null`.
-That keeps an agent from planting fsmonitor commands, filters or hooks that the
-host would run with the runner's env.
+add and remove, branch, remote, push) with
+`-c core.fsmonitor=false -c core.hooksPath=/dev/null` and
+`GIT_COMMON_DIR=<repo>/.git`, as a second line of defence: hooks and
+fsmonitor stay off and the common dir can't be redirected even if a file
+were planted.
 
 This is not a full boundary. The agent can still write the repo's objects and
-refs, including branches other than its own, and its branch is merged into
-`main` once approved.
+refs, including branches other than its own such as `main`, and its branch is
+merged into `main` once approved.
 
 Env: no host variable reaches the container except these, and their values
 never appear on the docker command line:
