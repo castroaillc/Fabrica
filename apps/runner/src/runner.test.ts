@@ -353,7 +353,10 @@ describe("runJob", () => {
     const repo = makeRepo();
     mkdirSync(folder(repo), { recursive: true });
     const { executor, calls } = fake(repo);
-    await expect(runJob(options(repo, executor).options, { id: ID, feature: "Do X" })).rejects.toThrow(/already exists/);
+    const error = await runJob(options(repo, executor).options, { id: ID, feature: "Do X" }).catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(Error);
+    expect((error as Error).message).toBe(`${ID}: job folder already exists: ${folder(repo)}`);
+    expect((error as Error & { code?: string }).code).toBe("EEXIST");
     expect(calls).toHaveLength(0);
     expect(existsSync(worktreeOf(repo))).toBe(false);
   });
