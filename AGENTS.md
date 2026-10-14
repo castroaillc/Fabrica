@@ -14,7 +14,7 @@ work**: it is the plan every job implements a piece of.
 factory/                         local factory runtime: backlog.md, dashboard.html, jobs/ (gitignored)
 docs/ROADMAP.md                  product plan and architecture
 packages/core/                   @fabrica/core: types and pure logic (no I/O)
-                                 (job state types, first-line contract parsers, agent file parsing from contents,
+                                 (job state types, first-line contract parsers, agent file parsing from contents with a tool allowlist,
                                  orchestrator state machine: transition(state, event) → actions for a runner, plus prompts and ports)
 apps/                            runnable apps (runner, cli) as they are added
 apps/runner/                     @fabrica/runner: the local runner that executes core's actions on the host (git worktrees, Agent SDK agents, job.json)
