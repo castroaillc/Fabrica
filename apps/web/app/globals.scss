@@ -1,0 +1,117 @@
+// Carbon's built-in @font-face rules use webpack's "~" prefix, which Turbopack doesn't
+// support. IBM Plex is loaded from the @ibm/plex-* CSS imported in layout.tsx instead.
+@use "@carbon/react" with (
+  $css--font-face: false
+);
+@use "@carbon/react/scss/breakpoint" as *;
+@use "@carbon/react/scss/spacing" as *;
+@use "@carbon/react/scss/theme" as *;
+@use "@carbon/react/scss/type" as *;
+
+html[data-theme="light"] {
+  color-scheme: light;
+}
+
+html[data-theme="dark"] {
+  color-scheme: dark;
+}
+
+body {
+  min-height: 100vh;
+  background: $background;
+  color: $text-primary;
+}
+
+.narrow-page {
+  max-width: 40rem;
+  margin: 0 auto;
+  padding: 3rem 1rem;
+}
+
+// Welcome
+
+.welcome {
+  padding-top: 3rem; // Carbon header height
+}
+
+.welcome__hero {
+  padding-block: $spacing-12 $spacing-10;
+}
+
+.welcome__eyebrow {
+  @include type-style("heading-compact-01");
+  color: $text-secondary;
+  margin-bottom: $spacing-05;
+}
+
+.welcome__title {
+  @include type-style("fluid-display-01", true);
+  margin-bottom: $spacing-06;
+}
+
+.welcome__lede {
+  @include type-style("fluid-heading-03", true);
+  color: $text-secondary;
+  margin-bottom: $spacing-08;
+}
+
+.welcome__actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: $spacing-05;
+}
+
+.welcome__features {
+  padding-bottom: $spacing-12;
+}
+
+.welcome__feature {
+  display: flex;
+  flex-direction: column;
+  gap: $spacing-04;
+  height: 100%;
+  margin-bottom: $spacing-05;
+}
+
+.welcome__feature-icon {
+  fill: $icon-interactive;
+}
+
+// Dashboard
+
+.dashboard {
+  min-height: 100vh;
+
+  // The SideNav sits inside the Header, so Carbon's sibling-based offset doesn't apply.
+  @include breakpoint(lg) {
+    margin-inline-start: 16rem;
+  }
+}
+
+.dashboard__heading {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: $spacing-05;
+  margin-bottom: $spacing-07;
+}
+
+.dashboard__muted {
+  color: $text-secondary;
+}
+
+.dashboard__stat {
+  margin-bottom: $spacing-05;
+}
+
+.dashboard__stat-value {
+  @include type-style("productive-heading-06");
+  margin-top: $spacing-03;
+}
+
+.dashboard__runner {
+  display: flex;
+  flex-direction: column;
+  gap: $spacing-03;
+}
