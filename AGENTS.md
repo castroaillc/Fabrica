@@ -15,6 +15,7 @@ factory/                         local factory runtime: backlog.md, dashboard.ht
 docs/ROADMAP.md                  product plan and architecture
 packages/core/                   @fabrica/core: types and pure logic (no I/O)
                                  (job state types, first-line contract parsers, agent file parsing from contents with a tool allowlist,
+                                 fabrica.yaml provider config parsing from contents,
                                  orchestrator state machine: transition(state, event) → actions for a runner, plus prompts and ports)
 apps/                            runnable apps (runner, cli) as they are added
 apps/runner/                     @fabrica/runner: the local runner that executes core's actions on the host (git worktrees, Agent SDK agents, job.json)
@@ -73,6 +74,28 @@ worktrees: dependencies are not installed there, unlike `SKILL.md` step 2.
 None yet. There are no pages to look at, so there is nothing for
 `agent-browser` to check. `factory/dashboard.html` is the existing static
 board (`cd factory && python3 -m http.server`).
+
+## Model providers
+
+`fabrica.yaml` at the repo root of the main checkout picks the provider and
+model for each agent role. Only `apps/runner` reads it, never from a job
+worktree. Without the file, or for a role it doesn't list, agents use their
+frontmatter `model` and the runner's environment. A role's `model` is optional
+and falls back to the frontmatter. See `fabrica.example.yaml`:
+
+```yaml
+providers:
+  api:            { type: anthropic }
+  claude-bedrock: { type: bedrock, region: us-east-1 }
+  claude-vertex:  { type: vertex, project: acme, region: us-east5 }
+  gateway:        { type: anthropic-compatible, base_url: http://litellm:4000 }
+roles:
+  builder:     { provider: claude-bedrock, model: claude-opus-5-5 }
+  reviewer-ux: { provider: gateway, model: qwen3-coder }
+```
+
+Credentials (`ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, the AWS credential
+chain, GCP ADC) come from the runner's environment, never from the file.
 
 ## Conventions
 
