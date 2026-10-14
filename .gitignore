@@ -5,3 +5,7 @@ coverage/
 .env
 /factory/jobs/
 .claude/settings.local.json
+.turbo
+.next
+next-env.d.ts
+.env*.local
