@@ -4,7 +4,7 @@ import type { JobState, Reviewer, Reviews, ReviewStatus, Stage } from "./index.j
 
 describe("job state", () => {
   it("lists stages and reviewers in SKILL.md order", () => {
-    expect(STAGES).toEqual(["spec", "build", "review", "approve", "merged", "needs-human"]);
+    expect(STAGES).toEqual(["spec", "build", "review", "approve", "merged", "pushed", "needs-human"]);
     expect(REVIEWERS).toEqual(["security", "ux", "ui", "code"]);
   });
 

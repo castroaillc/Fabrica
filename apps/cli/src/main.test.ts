@@ -160,6 +160,56 @@ describe("run", () => {
   });
 });
 
+describe("run --push", () => {
+  function withOrigin(repo: string): string {
+    const bare = join(repo, "..", "remote.git");
+    execFileSync("git", ["init", "-q", "--bare", bare]);
+    sh(repo, "remote", "add", "origin", bare);
+    return bare;
+  }
+
+  it("pushes factory/<id> to the remote instead of merging and prints <id>: pushed", async () => {
+    const repo = makeRepo();
+    const bare = withOrigin(repo);
+    const head = sh(repo, "rev-parse", "main");
+    const { code, out, err } = await cli(["run", "--push", "origin", "Ship", "it"], repo);
+    expect(err).toEqual([]);
+    expect(code).toBe(0);
+    expect(out.at(-1)).toBe("001-ship-it: pushed");
+    expect(readJob(repo, "001-ship-it")).toMatchObject({ stage: "pushed", feature: "Ship it", push: "origin" });
+    expect(sh(bare, "for-each-ref", "--format=%(refname)")).toBe("refs/heads/factory/001-ship-it\n");
+    expect(sh(repo, "rev-parse", "main")).toBe(head);
+  });
+
+  it("treats --push later in the feature as feature text", async () => {
+    const repo = makeRepo();
+    const { code, out } = await cli(["run", "Add", "--push", "flag"], repo);
+    expect(code).toBe(0);
+    expect(readJob(repo, "001-add-push-flag").feature).toBe("Add --push flag");
+    expect(out.at(-1)).toBe("001-add-push-flag: merged");
+  });
+
+  it.each([[["run", "--push"]], [["run", "--push", "origin"]], [["run", "--push", "", "x"]]])(
+    "prints usage to stderr and exits 1 for %j",
+    async (argv) => {
+      const repo = makeRepo();
+      const { code, out, err } = await cli(argv, repo);
+      expect(code).toBe(1);
+      expect(out).toEqual([]);
+      expect(err.join("\n")).toContain("  run [--push <remote>] <feature...>");
+      expect(existsSync(jobsDir(repo))).toBe(false);
+    },
+  );
+
+  it("exits 1 for a remote that does not exist, creating no job", async () => {
+    const repo = makeRepo();
+    withOrigin(repo);
+    const { code, out, err } = await cli(["run", "--push", "nosuch", "x"], repo);
+    expect({ code, out, err }).toEqual({ code: 1, out: [], err: ["fabrica: no remote named nosuch"] });
+    expect(existsSync(jobsDir(repo))).toBe(false);
+  });
+});
+
 describe("next", () => {
   it("claims the first unchecked line, runs it and leaves the line as checked with the job id", async () => {
     const backlog = "# Backlog\n\n- [x] Done thing → 001-done-thing\n- [ ] Add a 404 page\n- [ ] Second item\n";

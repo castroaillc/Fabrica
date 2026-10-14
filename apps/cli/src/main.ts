@@ -33,19 +33,20 @@ interface Outcome {
   stage: string;
 }
 
-// Starts a job under a chosen id: runJob in-process, or enqueueJob with DATABASE_URL.
-type Start = (input: { id: string; feature: string }) => Promise<Outcome>;
+// Starts a job under a chosen id: runJob in-process, or enqueueJob with DATABASE_URL. push is the remote of run --push.
+type Start = (input: { id: string; feature: string; push?: string }) => Promise<Outcome>;
 
 const USAGE = [
   "Usage: fabrica <command>",
   "",
   "Commands:",
-  "  run <feature...>           create a job for a feature and run it (queue it when DATABASE_URL is set)",
-  "  next                       claim the first unchecked item of factory/backlog.md and run it (or queue it)",
-  "  approve <job-id>           merge a needs-human job",
-  "  rework <job-id> <note...>  restart a needs-human job with a note for a fresh builder",
-  "  status                     list the jobs in factory/jobs/",
-  "  worker                     run queued jobs for this repo until stopped (needs DATABASE_URL)",
+  "  run [--push <remote>] <feature...>  create a job for a feature and run it (queue it when DATABASE_URL is set);",
+  "                                      with --push, push factory/<job-id> to the remote instead of merging",
+  "  next                                claim the first unchecked item of factory/backlog.md and run it (or queue it)",
+  "  approve <job-id>                    merge a needs-human job (or push it, for a job run with --push)",
+  "  rework <job-id> <note...>           restart a needs-human job with a note for a fresh builder",
+  "  status                              list the jobs in factory/jobs/",
+  "  worker                              run queued jobs for this repo until stopped (needs DATABASE_URL)",
 ];
 
 const UNCHECKED = "- [ ] ";
@@ -62,9 +63,17 @@ export async function main(argv: readonly string[], deps: CliDeps): Promise<numb
   };
   const text = args.join(" ");
   switch (command) {
-    case "run":
-      if (text.trim() === "") return usage();
-      return withRepo(deps, (options) => starting(options, deps, (start) => runFeature(options, text, start)));
+    case "run": {
+      // --push <remote> is only an option right after run: the feature is free text that may contain it.
+      const push = args[0] === "--push" ? args[1] : undefined;
+      const feature = args[0] === "--push" ? args.slice(2).join(" ") : text;
+      if (feature.trim() === "" || push?.trim() === "") return usage();
+      return withRepo(deps, (options) =>
+        starting(options, deps, (start) =>
+          runFeature(options, feature, push === undefined ? start : (input) => start({ ...input, push })),
+        ),
+      );
+    }
     case "next":
       if (args.length > 0) return usage();
       return withRepo(deps, (options) => starting(options, deps, (start) => next(options, deps, start)));

@@ -779,3 +779,184 @@ describe("a store on approveJob and reworkJob", () => {
     expect(row(repo)?.sessions[builderName(ID)]).toBe("session-1");
   });
 });
+
+// A local bare repo next to the temp repo, added as its remote origin.
+function bareRemote(repo: string): string {
+  const bare = join(dirname(repo), "remote.git");
+  execFileSync("git", ["init", "-q", "--bare", bare]);
+  sh(repo, "remote", "add", "origin", bare);
+  return bare;
+}
+
+function refs(bare: string): string[] {
+  return sh(bare, "for-each-ref", "--format=%(refname)").trim().split("\n").filter((ref) => ref !== "");
+}
+
+describe("push", () => {
+  it("pushes the approved branch to the remote instead of merging, keeping the worktree and branch", async () => {
+    const repo = makeRepo();
+    const bare = bareRemote(repo);
+    const head = sh(repo, "rev-parse", "main").trim();
+    const { executor } = fake(repo);
+    const { options: opts, notes } = options(repo, executor);
+    const job = await runJob(opts, { id: ID, feature: "Do X", push: "origin" });
+
+    expect(job.stage).toBe("pushed");
+    expect(job.push).toBe("origin");
+    expect(readJob(repo)).toEqual(job);
+    expect(refs(bare)).toEqual([`refs/heads/factory/${ID}`]);
+    expect(sh(bare, "rev-parse", `refs/heads/factory/${ID}`)).toBe(sh(repo, "rev-parse", `factory/${ID}`));
+    expect(sh(repo, "rev-parse", "main").trim()).toBe(head);
+    expect(existsSync(worktreeOf(repo))).toBe(true);
+    expect(sh(repo, "branch", "--list", `factory/${ID}`)).toContain(`factory/${ID}`);
+    expect(notes).toContain(`${ID}: approved → pushing factory/${ID} to origin`);
+    expect(notes.at(-1)).toBe(`${ID}: pushed factory/${ID} to origin`);
+  });
+
+  it("writes push into job.json after reviews only when it is given", async () => {
+    const repo = makeRepo();
+    bareRemote(repo);
+    const { executor } = fake(repo);
+    await runJob(options(repo, executor).options, { id: ID, feature: "Do X", push: "origin" });
+    const text = readFileSync(join(folder(repo), "job.json"), "utf8");
+    const job = JSON.parse(text) as JobState;
+    expect(Object.keys(job)).toEqual(["id", "feature", "branch", "worktree", "stage", "round", "reviews", "push"]);
+    expect(text).toBe(`${JSON.stringify(job, null, 2)}\n`);
+  });
+
+  it("pushes an escalated branch, then a rework that is approved fast-forwards it", async () => {
+    const repo = makeRepo();
+    const bare = bareRemote(repo);
+    const head = sh(repo, "rev-parse", "main").trim();
+    const first = fake(repo, { decision: () => "ESCALATE\n\nNeeds a call.\n" });
+    const { options: opts, notes } = options(repo, first.executor);
+    const escalated = await runJob(opts, { id: ID, feature: "Do X", push: "origin" });
+    expect(escalated.stage).toBe("needs-human");
+    expect(readJob(repo).stage).toBe("needs-human");
+    const pushed = sh(bare, "rev-parse", `refs/heads/factory/${ID}`).trim();
+    expect(pushed).toBe(sh(repo, "rev-parse", `factory/${ID}`).trim());
+    expect(notes.at(-1)).toBe(`${ID}: pushed factory/${ID} to origin`);
+
+    const second = fake(repo);
+    const job = await reworkJob(options(repo, second.executor).options, ID, "note");
+    expect(job.stage).toBe("pushed");
+    expect(job.push).toBe("origin");
+    const after = sh(bare, "rev-parse", `refs/heads/factory/${ID}`).trim();
+    expect(after).toBe(sh(repo, "rev-parse", `factory/${ID}`).trim());
+    expect(after).not.toBe(pushed);
+    expect(sh(bare, "merge-base", "--is-ancestor", pushed, after)).toBe("");
+    expect(refs(bare)).toEqual([`refs/heads/factory/${ID}`]);
+    expect(sh(repo, "rev-parse", "main").trim()).toBe(head);
+  });
+
+  it("does not force a push over a diverged remote branch and hands the job to a human", async () => {
+    const repo = makeRepo();
+    const bare = bareRemote(repo);
+    const unrelated = sh(repo, "commit-tree", "-m", "Unrelated", "main^{tree}").trim();
+    sh(repo, "push", "-q", "origin", `${unrelated}:refs/heads/factory/${ID}`);
+    const { executor } = fake(repo);
+    const { options: opts, notes } = options(repo, executor);
+    const job = await runJob(opts, { id: ID, feature: "Do X", push: "origin" });
+
+    expect(job.stage).toBe("needs-human");
+    expect(readJob(repo).stage).toBe("needs-human");
+    expect(sh(bare, "rev-parse", `refs/heads/factory/${ID}`).trim()).toBe(unrelated);
+    expect(notes.at(-1)).toMatch(new RegExp(`^${ID}: needs a human, push failed: .*rejected`, "s"));
+    expect(notes.filter((n) => n.startsWith(`${ID}: approved → pushing`))).toHaveLength(1);
+  });
+
+  it("refuses an unknown remote before creating the job folder, saving or sending", async () => {
+    const repo = makeRepo();
+    bareRemote(repo);
+    const { executor, calls } = fake(repo);
+    await expect(runJob(options(repo, executor).options, { id: ID, feature: "X", push: "nosuch" })).rejects.toThrow(
+      "no remote named nosuch",
+    );
+    const { store, rows } = memoryStore();
+    const queue = fakeQueue();
+    await expect(
+      enqueueJob(options(repo, executor, { store }).options, queue, { id: ID, feature: "X", push: "nosuch" }),
+    ).rejects.toThrow("no remote named nosuch");
+    await expect(runJob(options(repo, executor).options, { id: ID, feature: "X", push: "--all" })).rejects.toThrow(
+      "no remote named --all",
+    );
+    expect(existsSync(join(repo, "factory", "jobs"))).toBe(false);
+    expect(rows.size).toBe(0);
+    expect(queue.sent).toEqual([]);
+    expect(calls).toHaveLength(0);
+    expect(sh(repo, "worktree", "list").trim().split("\n")).toHaveLength(1);
+  });
+
+  it("enqueues a push job that a resumed worker pushes", async () => {
+    const repo = makeRepo();
+    const bare = bareRemote(repo);
+    const { store, row } = memoryStore();
+    await enqueueJob(options(repo, fake(repo).executor, { store }).options, fakeQueue(), {
+      id: ID,
+      feature: "Do X",
+      push: "origin",
+    });
+    expect(row(repo)?.state.job.push).toBe("origin");
+    const job = await resumeJob(options(repo, fake(repo).executor, { store }).options, ID);
+    expect(job.stage).toBe("pushed");
+    expect(refs(bare)).toEqual([`refs/heads/factory/${ID}`]);
+    expect(row(repo)?.state).toMatchObject({ awaiting: "nothing", job: { stage: "pushed" } });
+  });
+
+  it.each([
+    ["push", (s: SavedJob) => void Object.assign(s.state.job, { push: "" })],
+    ["push", (s: SavedJob) => void Object.assign(s.state.job, { push: 1 })],
+    [
+      "in-flight remote",
+      (s: SavedJob) => void (s.inFlight = [{ type: "pushBranch", remote: "evil", branch: s.state.job.branch }]),
+    ],
+    [
+      "in-flight branch",
+      (s: SavedJob) => void (s.inFlight = [{ type: "pushBranch", remote: "origin", branch: "main" }]),
+    ],
+  ])("rejects a saved state with a bad %s", async (field, tamper) => {
+    const repo = makeRepo();
+    const bare = bareRemote(repo);
+    const { store, row } = memoryStore();
+    await enqueueJob(options(repo, fake(repo).executor, { store }).options, fakeQueue(), {
+      id: ID,
+      feature: "Do X",
+      push: "origin",
+    });
+    tamper(row(repo)!);
+    const { executor, calls } = fake(repo);
+    await expect(resumeJob(options(repo, executor, { store }).options, ID)).rejects.toThrow(
+      `${ID}: the saved state has ${field} `,
+    );
+    expect(calls).toHaveLength(0);
+    expect(refs(bare)).toEqual([]);
+  });
+
+  it("rejects a job.json with an empty push before touching git or agents", async () => {
+    const repo = makeRepo();
+    bareRemote(repo);
+    const first = fake(repo, { build: () => "STATUS: BLOCKED\n" });
+    const blocked = await runJob(options(repo, first.executor).options, { id: ID, feature: "Do X", push: "origin" });
+    writeFileSync(join(folder(repo), "job.json"), `${JSON.stringify({ ...blocked, push: "" })}\n`);
+    const { executor, calls } = fake(repo);
+    await expect(approveJob(options(repo, executor).options, ID)).rejects.toThrow(/has push ""/);
+    await expect(reworkJob(options(repo, executor).options, ID, "note")).rejects.toThrow(/has push ""/);
+    expect(calls).toHaveLength(0);
+  });
+
+  it("refuses to run git push for a branch or remote outside the job", async () => {
+    const repo = makeRepo();
+    const bare = bareRemote(repo);
+    const first = fake(repo, { build: () => "STATUS: BLOCKED\n" });
+    const blocked = await runJob(options(repo, first.executor).options, { id: ID, feature: "Do X" });
+    expect(refs(bare)).toEqual([]);
+    for (const push of ["nosuch", "--force"]) {
+      writeFileSync(join(folder(repo), "job.json"), `${JSON.stringify({ ...blocked, push })}\n`);
+      const { options: opts, notes } = options(repo, fake(repo).executor);
+      const job = await approveJob(opts, ID);
+      expect(job.stage).toBe("needs-human");
+      expect(notes.at(-1)).toBe(`${ID}: needs a human, push failed: no remote named ${push}`);
+    }
+    expect(refs(bare)).toEqual([]);
+  });
+});

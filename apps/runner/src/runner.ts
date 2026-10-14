@@ -65,6 +65,7 @@ const EVENT_ACTIONS: ReadonlySet<string> = new Set<Action["type"]>([
   "checkMainCheckout",
   "merge",
   "removeWorktree",
+  "pushBranch",
 ]);
 
 const AWAITING: Record<Awaiting, true> = {
@@ -76,25 +77,32 @@ const AWAITING: Record<Awaiting, true> = {
   "main-checkout": true,
   merge: true,
   "worktree-remove": true,
+  push: true,
+  "handoff-push": true,
   nothing: true,
 };
 
-export async function runJob(options: RunnerOptions, input: { id: string; feature: string }): Promise<JobState> {
+export async function runJob(
+  options: RunnerOptions,
+  input: { id: string; feature: string; push?: string },
+): Promise<JobState> {
   const ctx = await context(options, input.id);
+  await checkRemote(ctx, input.push);
   await reserveJobFolder(ctx);
-  return drive(ctx, startJob({ id: ctx.id, feature: input.feature, repo: ctx.repo }));
+  return drive(ctx, startJob({ ...input, id: ctx.id, repo: ctx.repo }));
 }
 
 // Creates the job the way runJob does, but leaves the running to a worker: job.json, the saved row, then one queue message.
 export async function enqueueJob(
   options: RunnerOptions,
   queue: JobQueue,
-  input: { id: string; feature: string },
+  input: { id: string; feature: string; push?: string },
 ): Promise<JobState> {
   const store = requireStore(options);
   const ctx = await context(options, input.id);
+  await checkRemote(ctx, input.push);
   await reserveJobFolder(ctx);
-  const { state, actions } = startJob({ id: ctx.id, feature: input.feature, repo: ctx.repo });
+  const { state, actions } = startJob({ ...input, id: ctx.id, repo: ctx.repo });
   await writeJobFile(ctx.repo, ctx.id, join(jobFolder(ctx.repo, ctx.id), "job.json"), jobJson(state.job));
   await store.save(ctx.repo, ctx.id, { feature: input.feature, state, inFlight: actions.filter(isEventAction) });
   await queue.send({ repo: ctx.repo, id: ctx.id });
@@ -140,6 +148,17 @@ async function context(options: RunnerOptions, id: string): Promise<Context> {
 function requireStore(options: RunnerOptions): JobStore {
   if (options.store === undefined) throw new Error("This needs a job store (RunnerOptions.store)");
   return options.store;
+}
+
+// A push remote must be a remote name configured in the main checkout, never a URL or an option.
+async function checkRemote(ctx: Context, remote: string | undefined): Promise<void> {
+  if (remote !== undefined && !(await remotes(ctx.repo)).includes(remote)) throw new Error(`no remote named ${remote}`);
+}
+
+async function remotes(repo: string): Promise<string[]> {
+  const list = await git(["remote"], repo);
+  if (!list.ok) throw new Error(`git remote failed in ${repo}: ${list.error}`);
+  return list.stdout.split("\n").filter((name) => name !== "");
 }
 
 // Reserves the id: the folder's mkdir fails with EEXIST when another session took it.
@@ -216,6 +235,7 @@ function checkJob(ctx: Context, job: JobState, source: string): void {
   if (job.worktree !== expected.worktree) reject("worktree", job.worktree);
   if (!Number.isInteger(job.round) || job.round < 0) reject("round", job.round);
   if (!(STAGES as readonly unknown[]).includes(job.stage)) reject("stage", job.stage);
+  if ("push" in job && (typeof job.push !== "string" || job.push === "")) reject("push", job.push);
 }
 
 // A saved row is checked like job.json, and its in-flight actions may only be event-producing ones on the job's branch and worktree.
@@ -235,6 +255,7 @@ function savedState(ctx: Context, saved: SavedJob): OrchestratorState {
     if (!isEventAction(action)) reject("in-flight action", action);
     if ("branch" in action && action.branch !== state.job.branch) reject("in-flight branch", action.branch);
     if ("worktree" in action && action.worktree !== state.job.worktree) reject("in-flight worktree", action.worktree);
+    if (action.type === "pushBranch" && action.remote !== state.job.push) reject("in-flight remote", action.remote);
   }
   if (typeof sessions !== "object" || sessions === null || Object.values(sessions).some((s) => typeof s !== "string")) {
     reject("sessions", sessions);
@@ -349,6 +370,9 @@ async function execute(
         if (!remove.ok) options.notify(`${id}: git branch -d ${action.branch} failed: ${remove.error}`);
         break;
       }
+      case "pushBranch":
+        track(running, action, Promise.resolve(await pushBranch(ctx, action.remote, action.branch)));
+        break;
       case "notify":
         options.notify(action.message);
         break;
@@ -357,8 +381,9 @@ async function execute(
 }
 
 function jobJson(job: JobState): string {
-  const { id, feature, branch, worktree, stage, round, reviews } = job;
-  return `${JSON.stringify({ id, feature, branch, worktree, stage, round, reviews }, null, 2)}\n`;
+  const { id, feature, branch, worktree, stage, round, reviews, push } = job;
+  const keys = { id, feature, branch, worktree, stage, round, reviews, ...(push !== undefined && { push }) };
+  return `${JSON.stringify(keys, null, 2)}\n`;
 }
 
 function definition(ctx: Context, agent: AgentName): AgentDefinition {
@@ -432,6 +457,17 @@ async function hasWorktree(repo: string, branch: string, worktree: string): Prom
     const lines = block.split("\n");
     return lines.includes(`worktree ${worktree}`) && lines.includes(`branch refs/heads/${branch}`);
   });
+}
+
+// Pushes only factory/<job-id> to a configured remote, with both sides of the refspec spelled out and never forced.
+async function pushBranch(ctx: Context, remote: string, branch: string): Promise<OrchestratorEvent> {
+  const { repo, id } = ctx;
+  if (branch !== `factory/${id}`) {
+    return { type: "pushDone", ok: false, error: `refusing to push ${branch}: only factory/${id} may be pushed` };
+  }
+  if (!(await remotes(repo)).includes(remote)) return { type: "pushDone", ok: false, error: `no remote named ${remote}` };
+  const push = await git(["push", "--end-of-options", remote, `refs/heads/${branch}:refs/heads/${branch}`], repo);
+  return push.ok ? { type: "pushDone", ok: true } : { type: "pushDone", ok: false, error: push.error };
 }
 
 async function checkMainCheckout(ctx: Context): Promise<OrchestratorEvent> {
