@@ -185,4 +185,57 @@ describe.skipIf(!imageBuilt())("a job container from fabrica/job", () => {
     });
     expect(left.trim()).toBe("");
   });
+
+  it("opens a page served inside the job's container with agent-browser", { timeout: 120_000 }, async () => {
+    const root = realpathSync(mkdtempSync(join(tmpdir(), "fabrica-docker-it-")));
+    temps.push(root);
+    const repo = join(root, "app");
+    mkdirSync(repo);
+    sh(repo, "init", "-q", "-b", "main");
+    sh(repo, "config", "user.name", "Test");
+    sh(repo, "config", "user.email", "test@example.com");
+    writeFileSync(join(repo, "README.md"), "hello\n");
+    sh(repo, "add", ".");
+    sh(repo, "commit", "-q", "-m", "Initial");
+    const worktree = join(root, "app-factory", ID);
+    sh(repo, "worktree", "add", "-q", "-b", `factory/${ID}`, worktree, "main");
+    const folder = join(repo, "factory", "jobs", ID);
+    mkdirSync(folder, { recursive: true });
+
+    const real = dockerLauncher(process.env);
+    let name: string | undefined;
+    const launcher: ContainerLauncher = {
+      ensure: async (given) => {
+        name = given.name;
+        await real.ensure(given);
+      },
+      exec: (request) => real.exec(request),
+      remove: (container) => real.remove(container),
+    };
+    const { setup, teardown } = dockerExecutor({ launcher, env: process.env });
+    const shell = (script: string) => setup({ command: ["sh", "-c", script], cwd: worktree, jobId: ID, jobFolder: folder });
+    // A tiny server inside the container: localhost:4321 is the container, where the agent's dev server would run.
+    const server = `require("http").createServer((q, s) => s.end("<title>fabrica page</title><h1>fabrica ok</h1>")).listen(4321)`;
+    const session = `--session ${ID}-builder`;
+    try {
+      const opened = await shell(
+        `node -e '${server}' >/dev/null 2>&1 & sleep 1; ` +
+          `agent-browser ${session} open http://localhost:4321 && ` +
+          `agent-browser ${session} get title && agent-browser ${session} get text h1`,
+      );
+      expect(opened.ok, opened.output).toBe(true);
+      expect(opened.output).toContain("fabrica page");
+      expect(opened.output).toContain("fabrica ok");
+
+      const closed = await shell(`agent-browser ${session} close`);
+      expect(closed.ok, closed.output).toBe(true);
+    } finally {
+      await teardown(repo, ID);
+    }
+    expect(name).toBeDefined();
+    const left = execFileSync("docker", ["ps", "-a", "--filter", `name=${name}`, "--format", "{{.Names}}"], {
+      encoding: "utf8",
+    });
+    expect(left.trim()).toBe("");
+  });
 });
