@@ -4,25 +4,48 @@ import { readFile, readdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { REVIEWERS, nextJobNumber } from "@fabrica/core";
 import type { JobState } from "@fabrica/core";
-import { approveJob, isValidJobId, reworkJob, runJob } from "@fabrica/runner";
-import type { AgentExecutor, RunnerOptions } from "@fabrica/runner";
+import {
+  approveJob,
+  enqueueJob,
+  isValidJobId,
+  openJobStore,
+  openQueue,
+  reworkJob,
+  runJob,
+  startWorker,
+} from "@fabrica/runner";
+import type { AgentExecutor, JobStore, RunnerOptions } from "@fabrica/runner";
 
 export interface CliDeps {
   cwd: string;
   executor: AgentExecutor;
   out: (line: string) => void;
   err: (line: string) => void;
+  // DATABASE_URL: when set, run and next enqueue for a worker, and approve and rework keep the job store in step.
+  databaseUrl?: string;
+  // Stops fabrica worker.
+  signal?: AbortSignal;
 }
+
+// The line a command ends with: "<job-id>: <stage>", or "<job-id>: queued".
+interface Outcome {
+  id: string;
+  stage: string;
+}
+
+// Starts a job under a chosen id: runJob in-process, or enqueueJob with DATABASE_URL.
+type Start = (input: { id: string; feature: string }) => Promise<Outcome>;
 
 const USAGE = [
   "Usage: fabrica <command>",
   "",
   "Commands:",
-  "  run <feature...>           create a job for a feature and run it",
-  "  next                       claim the first unchecked item of factory/backlog.md and run it",
+  "  run <feature...>           create a job for a feature and run it (queue it when DATABASE_URL is set)",
+  "  next                       claim the first unchecked item of factory/backlog.md and run it (or queue it)",
   "  approve <job-id>           merge a needs-human job",
   "  rework <job-id> <note...>  restart a needs-human job with a note for a fresh builder",
   "  status                     list the jobs in factory/jobs/",
+  "  worker                     run queued jobs for this repo until stopped (needs DATABASE_URL)",
 ];
 
 const UNCHECKED = "- [ ] ";
@@ -41,22 +64,22 @@ export async function main(argv: readonly string[], deps: CliDeps): Promise<numb
   switch (command) {
     case "run":
       if (text.trim() === "") return usage();
-      return withRepo(deps, (options) => runFeature(options, text));
+      return withRepo(deps, (options) => starting(options, deps, (start) => runFeature(options, text, start)));
     case "next":
       if (args.length > 0) return usage();
-      return withRepo(deps, (options) => next(options, deps));
+      return withRepo(deps, (options) => starting(options, deps, (start) => next(options, deps, start)));
     case "approve": {
       if (args.length !== 1) return usage();
       const id = args[0]!;
       if (!validId(id, deps)) return 1;
-      return withRepo(deps, (options) => approveJob(options, id));
+      return withRepo(deps, (options) => withJobStore(options, deps, (stored) => approveJob(stored, id)));
     }
     case "rework": {
       const [id, ...words] = args;
       const note = words.join(" ");
       if (id === undefined || note.trim() === "") return usage();
       if (!validId(id, deps)) return 1;
-      return withRepo(deps, (options) => reworkJob(options, id, note));
+      return withRepo(deps, (options) => withJobStore(options, deps, (stored) => reworkJob(stored, id, note)));
     }
     case "status":
       if (args.length > 0) return usage();
@@ -64,6 +87,15 @@ export async function main(argv: readonly string[], deps: CliDeps): Promise<numb
         await status(options.repo, deps);
         return null;
       });
+    case "worker": {
+      if (args.length > 0) return usage();
+      const { databaseUrl } = deps;
+      if (databaseUrl === undefined) {
+        deps.err("fabrica: worker needs DATABASE_URL");
+        return 1;
+      }
+      return withRepo(deps, (options) => work(options, databaseUrl, deps.signal));
+    }
     default:
       return usage();
   }
@@ -85,7 +117,7 @@ function validId(id: string, deps: CliDeps): boolean {
 }
 
 // Resolves the repo, runs the command and prints its final "<job-id>: <stage>" line. null means there is no job to report.
-async function withRepo(deps: CliDeps, command: (options: RunnerOptions) => Promise<JobState | null>): Promise<number> {
+async function withRepo(deps: CliDeps, command: (options: RunnerOptions) => Promise<Outcome | null>): Promise<number> {
   const repo = await toplevel(deps.cwd);
   if (repo === null) {
     deps.err("fabrica: not inside a git repository");
@@ -110,18 +142,72 @@ function toplevel(cwd: string): Promise<string | null> {
   });
 }
 
+// Hands run and next a Start: runJob in-process, or, with DATABASE_URL, enqueueJob on this repo's queue and the job store.
+async function starting(
+  options: RunnerOptions,
+  deps: CliDeps,
+  command: (start: Start) => Promise<Outcome | null>,
+): Promise<Outcome | null> {
+  const { databaseUrl } = deps;
+  if (databaseUrl === undefined) return command((input) => runJob(options, input));
+  return withStore(databaseUrl, async (store) => {
+    const queue = await openQueue({ databaseUrl }, options.repo, options.notify);
+    try {
+      return await command(async (input) => {
+        const job = await enqueueJob({ ...options, store }, queue, input);
+        return { id: job.id, stage: "queued" };
+      });
+    } finally {
+      await queue.close();
+    }
+  });
+}
+
+// approve and rework run in-process either way. With DATABASE_URL they also keep the job's row and builder session in step.
+function withJobStore(
+  options: RunnerOptions,
+  deps: CliDeps,
+  command: (options: RunnerOptions) => Promise<JobState>,
+): Promise<JobState> {
+  if (deps.databaseUrl === undefined) return command(options);
+  return withStore(deps.databaseUrl, (store) => command({ ...options, store }));
+}
+
+async function withStore<T>(databaseUrl: string, command: (store: JobStore) => Promise<T>): Promise<T> {
+  const store = await openJobStore(databaseUrl);
+  try {
+    return await command(store);
+  } finally {
+    await store.close();
+  }
+}
+
+// Runs this repo's queue worker until signal aborts, then stops it gracefully.
+async function work(options: RunnerOptions, databaseUrl: string, signal: AbortSignal | undefined): Promise<null> {
+  return withStore(databaseUrl, async (store) => {
+    const worker = await startWorker({ ...options, store }, { databaseUrl });
+    await new Promise<void>((done) => {
+      if (signal?.aborted) done();
+      else signal?.addEventListener("abort", () => done(), { once: true });
+    });
+    await worker.stop();
+    return null;
+  });
+}
+
 // Creates the job under the next free number, picking the next one again when another session took the folder.
-// beforeAttempt runs with each chosen id just before runJob.
+// beforeAttempt runs with each chosen id just before start.
 async function runFeature(
   options: RunnerOptions,
   feature: string,
+  start: Start,
   beforeAttempt?: (id: string) => Promise<void>,
-): Promise<JobState> {
+): Promise<Outcome> {
   for (;;) {
     const id = `${nextJobNumber(await jobEntries(options.repo))}-${slug(feature)}`;
     await beforeAttempt?.(id);
     try {
-      return await runJob(options, { id, feature });
+      return await start({ id, feature });
     } catch (error) {
       if (errorCode(error) !== "EEXIST") throw error;
     }
@@ -137,7 +223,7 @@ async function jobEntries(repo: string): Promise<string[]> {
   }
 }
 
-async function next(options: RunnerOptions, deps: CliDeps): Promise<JobState | null> {
+async function next(options: RunnerOptions, deps: CliDeps, start: Start): Promise<Outcome | null> {
   const file = join(options.repo, "factory", "backlog.md");
   const item = await claim(file);
   if (item === null) {
@@ -145,7 +231,7 @@ async function next(options: RunnerOptions, deps: CliDeps): Promise<JobState | n
     return null;
   }
   let line = `- [x] ${item} → claimed`;
-  return runFeature(options, item, async (id) => {
+  return runFeature(options, item, start, async (id) => {
     const marked = `- [x] ${item} → ${id}`;
     const text = replaceLine(await readFile(file, "utf8"), line, marked);
     if (text === null) throw new Error(`${file} no longer has the line: ${line}`);

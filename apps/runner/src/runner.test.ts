@@ -3,11 +3,20 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync,
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { REVIEWERS, parseAgentFile, parseFabricaConfig, resumeMessage, reworkPrompt } from "@fabrica/core";
+import {
+  REVIEWERS,
+  builderName,
+  parseAgentFile,
+  parseFabricaConfig,
+  resumeMessage,
+  reworkPrompt,
+} from "@fabrica/core";
 import type { JobState, Reviewer, Verdict } from "@fabrica/core";
 import type { AgentCall, AgentExecutor } from "./executor.js";
 import { isValidJobId } from "./jobFolder.js";
-import { approveJob, reworkJob, runJob } from "./runner.js";
+import type { JobStore, SavedJob } from "./jobStore.js";
+import type { JobMessage, JobQueue } from "./queue.js";
+import { approveJob, enqueueJob, resumeJob, reworkJob, runJob } from "./runner.js";
 import type { RunnerOptions } from "./runner.js";
 
 const ID = "003-x";
@@ -533,5 +542,240 @@ roles:
       "bedrock",
       "vertex",
     ]);
+  });
+});
+
+// An in-memory JobStore. Rows go through JSON like Postgres jsonb, and each saveSession records the state it landed on.
+function memoryStore(rows = new Map<string, SavedJob>()) {
+  const key = (repo: string, id: string) => `${repo}\n${id}`;
+  const copy = <T>(value: T): T => JSON.parse(JSON.stringify(value)) as T;
+  const sessionSaves: { name: string; sessionId: string; awaiting: string }[] = [];
+  const store: JobStore = {
+    async load(repo, id) {
+      const row = rows.get(key(repo, id));
+      return row === undefined ? null : copy(row);
+    },
+    async save(repo, id, saved) {
+      rows.set(key(repo, id), copy({ ...saved, sessions: rows.get(key(repo, id))?.sessions ?? {} }));
+    },
+    async saveSession(repo, id, name, sessionId) {
+      const row = rows.get(key(repo, id));
+      if (row === undefined) throw new Error(`no row for ${id}`);
+      row.sessions[name] = sessionId;
+      sessionSaves.push({ name, sessionId, awaiting: row.state.awaiting });
+    },
+  };
+  return { store, rows, sessionSaves, row: (repo: string) => rows.get(key(repo, ID)) };
+}
+
+function fakeQueue(): JobQueue & { sent: JobMessage[] } {
+  const sent: JobMessage[] = [];
+  return { sent, send: async (message) => void sent.push(message) };
+}
+
+const never = new Promise<void>(() => {});
+
+// Waits until check passes, polling, so a test can look at the store while a "crashed" run hangs.
+async function until(check: () => boolean): Promise<void> {
+  for (let tries = 0; !check(); tries++) {
+    if (tries > 400) throw new Error("timed out waiting");
+    await sleep(5);
+  }
+}
+
+describe("enqueueJob", () => {
+  it("writes job.json and the saved row, and sends one message without running anything", async () => {
+    const repo = makeRepo();
+    const { store, row } = memoryStore();
+    const queue = fakeQueue();
+    const { executor, calls } = fake(repo);
+    const job = await enqueueJob(options(repo, executor, { store }).options, queue, { id: ID, feature: "Do X" });
+
+    expect(job.stage).toBe("spec");
+    expect(readJob(repo)).toEqual(job);
+    expect(readJob(repo)).toMatchObject({ stage: "spec", round: 0 });
+    expect(Object.values(readJob(repo).reviews)).toEqual(["pending", "pending", "pending", "pending"]);
+    expect(row(repo)).toEqual({
+      feature: "Do X",
+      state: { repo, job, resumes: 0, awaiting: "worktree" },
+      inFlight: [{ type: "createWorktree", branch: `factory/${ID}`, worktree: worktreeOf(repo) }],
+      sessions: {},
+    });
+    expect(queue.sent).toEqual([{ repo, id: ID }]);
+    expect(calls).toHaveLength(0);
+    expect(existsSync(worktreeOf(repo))).toBe(false);
+  });
+
+  it("refuses a job folder that already exists, without saving or sending", async () => {
+    const repo = makeRepo();
+    mkdirSync(folder(repo), { recursive: true });
+    const { store, rows } = memoryStore();
+    const queue = fakeQueue();
+    const error = await enqueueJob(options(repo, fake(repo).executor, { store }).options, queue, {
+      id: ID,
+      feature: "Do X",
+    }).catch((e: unknown) => e);
+    expect((error as Error & { code?: string }).code).toBe("EEXIST");
+    expect(rows.size).toBe(0);
+    expect(queue.sent).toEqual([]);
+  });
+});
+
+describe("resumeJob", () => {
+  it("drives a freshly enqueued job to merged and keeps the row in step", async () => {
+    const repo = makeRepo();
+    const { store, row, sessionSaves } = memoryStore();
+    await enqueueJob(options(repo, fake(repo).executor, { store }).options, fakeQueue(), { id: ID, feature: "Do X" });
+    const { executor, calls } = fake(repo);
+    const job = await resumeJob(options(repo, executor, { store }).options, ID);
+
+    expect(job.stage).toBe("merged");
+    expect(readJob(repo)).toEqual(job);
+    expect(calls.map((c) => c.agent.name).sort()).toEqual([...AGENTS].sort());
+    expect(sh(repo, "log", "-1", "--format=%s", "main").trim()).toBe(`Merge factory/${ID}`);
+    expect(row(repo)?.state).toEqual({ repo, job, resumes: 0, awaiting: "nothing" });
+    expect(row(repo)?.inFlight).toEqual([]);
+    const builder = calls.findIndex((c) => c.agent.name === "builder");
+    expect(row(repo)?.sessions).toEqual({ [builderName(ID)]: `session-${builder + 1}` });
+    // The session id is saved before the builder's agentDone is applied.
+    expect(sessionSaves).toEqual([{ name: builderName(ID), sessionId: `session-${builder + 1}`, awaiting: "builder" }]);
+  });
+
+  it("resumes the persisted builder session after a restart in round 2's build", async () => {
+    const repo = makeRepo();
+    const { store, rows, row } = memoryStore();
+    await enqueueJob(options(repo, fake(repo).executor, { store }).options, fakeQueue(), { id: ID, feature: "Do X" });
+    const first = fake(repo, {
+      review: (reviewer, round) => (round === 1 && reviewer === "code" ? "CHANGES" : "PASS"),
+      // The runner "dies" while the resumed builder runs: its call never settles.
+      hold: (call) => (call.resume !== undefined ? never : Promise.resolve()),
+    });
+    void resumeJob(options(repo, first.executor, { store }).options, ID);
+    await until(() => row(repo)?.inFlight[0]?.type === "resumeBuilder");
+    const saved = row(repo)!;
+    const session = saved.sessions[builderName(ID)];
+    expect(session).toBe(`session-${first.calls.findIndex((c) => c.agent.name === "builder") + 1}`);
+    expect(saved.state).toMatchObject({ awaiting: "builder", resumes: 1, job: { stage: "build", round: 1 } });
+    expect(saved.inFlight).toEqual([{ type: "resumeBuilder", name: builderName(ID), message: resumeMessage(ID, 1) }]);
+
+    // A new runner process: a fresh store client over the same rows.
+    const second = fake(repo);
+    const job = await resumeJob(options(repo, second.executor, { store: memoryStore(rows).store }).options, ID);
+    expect(second.calls[0]?.agent.name).toBe("builder");
+    expect(second.calls[0]?.resume).toBe(session);
+    expect(second.calls[0]?.prompt).toBe(resumeMessage(ID, 1));
+    expect(second.calls.filter((c) => c.agent.name === "spec-writer")).toHaveLength(0);
+    expect(job.stage).toBe("merged");
+    expect(job.round).toBe(2);
+  });
+
+  it("spawns only the reviewers still pending after a restart mid-round", async () => {
+    const repo = makeRepo();
+    const { store, rows, row } = memoryStore();
+    await enqueueJob(options(repo, fake(repo).executor, { store }).options, fakeQueue(), { id: ID, feature: "Do X" });
+    const hung = new Set(["reviewer-ux", "reviewer-code"]);
+    const first = fake(repo, { hold: (call) => (hung.has(call.agent.name) ? never : Promise.resolve()) });
+    void resumeJob(options(repo, first.executor, { store }).options, ID);
+    await until(() => row(repo)?.state.job.reviews.ui === "PASS" && row(repo)?.state.job.reviews.security === "PASS");
+    const saved = row(repo)!;
+    expect(saved.state.awaiting).toBe("reviewers");
+    expect(saved.inFlight.map((a) => (a.type === "spawnAgent" ? a.agent : a.type)).sort()).toEqual([
+      "reviewer-code",
+      "reviewer-ux",
+    ]);
+
+    const second = fake(repo);
+    const job = await resumeJob(options(repo, second.executor, { store: memoryStore(rows).store }).options, ID);
+    expect(second.calls.map((c) => c.agent.name)).toEqual(["reviewer-ux", "reviewer-code", "approver"]);
+    expect(job.stage).toBe("merged");
+    expect(job.reviews).toEqual({ security: "PASS", ux: "PASS", ui: "PASS", code: "PASS" });
+  });
+
+  it("accepts a worktree that git worktree add already created, and still runs the setup command", async () => {
+    const repo = makeRepo();
+    const { store } = memoryStore();
+    await enqueueJob(options(repo, fake(repo).executor, { store }).options, fakeQueue(), { id: ID, feature: "Do X" });
+    sh(repo, "worktree", "add", "-q", "-b", `factory/${ID}`, worktreeOf(repo), "main");
+    let ranInWorktree = false;
+    const { executor } = fake(repo, {
+      hold: async (call) => {
+        ranInWorktree ||= existsSync(join(call.cwd, "setup-ran"));
+      },
+    });
+    const setup = ["node", "-e", "require('node:fs').writeFileSync('setup-ran', '')"];
+    const { options: opts, notes } = options(repo, executor, { store, setup });
+    const job = await resumeJob(opts, ID);
+    expect(notes.some((n) => n.includes("worktree setup failed"))).toBe(false);
+    expect(ranInWorktree).toBe(true);
+    expect(job.stage).toBe("merged");
+  });
+
+  it("does nothing for a row awaiting nothing", async () => {
+    const repo = makeRepo();
+    const { store, row } = memoryStore();
+    await enqueueJob(options(repo, fake(repo).executor, { store }).options, fakeQueue(), { id: ID, feature: "Do X" });
+    const saved = row(repo)!;
+    saved.state = { ...saved.state, job: { ...saved.state.job, stage: "needs-human" }, awaiting: "nothing" };
+    const before = readFileSync(join(folder(repo), "job.json"), "utf8");
+    const { executor, calls } = fake(repo);
+    const job = await resumeJob(options(repo, executor, { store }).options, ID);
+    expect(job).toEqual(saved.state.job);
+    expect(calls).toHaveLength(0);
+    expect(readFileSync(join(folder(repo), "job.json"), "utf8")).toBe(before);
+    expect(existsSync(worktreeOf(repo))).toBe(false);
+  });
+
+  it.each([
+    ["branch", (s: SavedJob) => void (s.state.job.branch = "main")],
+    ["worktree", (s: SavedJob) => void (s.state.job.worktree = "/tmp/elsewhere")],
+    ["id", (s: SavedJob) => void (s.state.job.id = "004-y")],
+    ["repo", (s: SavedJob) => void (s.state.repo = "/tmp/other")],
+    ["awaiting", (s: SavedJob) => void Object.assign(s.state, { awaiting: "shipping" })],
+    ["resumes", (s: SavedJob) => void (s.state.resumes = 3)],
+    ["resumes", (s: SavedJob) => void (s.state.resumes = 0.5)],
+    ["in-flight action", (s: SavedJob) => void (s.inFlight = [{ type: "writeFile", path: "/tmp/x", content: "x" }])],
+    ["in-flight action", (s: SavedJob) => void (s.inFlight = [{ type: "notify", message: "x" }])],
+    [
+      "in-flight branch",
+      (s: SavedJob) => void (s.inFlight = [{ type: "createWorktree", branch: "main", worktree: s.state.job.worktree }]),
+    ],
+    ["in-flight worktree", (s: SavedJob) => void (s.inFlight = [{ type: "removeWorktree", worktree: "/tmp/elsewhere" }])],
+  ])("rejects a saved state with a bad %s before touching git or agents", async (field, tamper) => {
+    const repo = makeRepo();
+    const { store, row } = memoryStore();
+    await enqueueJob(options(repo, fake(repo).executor, { store }).options, fakeQueue(), { id: ID, feature: "Do X" });
+    tamper(row(repo)!);
+    const before = readFileSync(join(folder(repo), "job.json"), "utf8");
+    const { executor, calls } = fake(repo);
+    await expect(resumeJob(options(repo, executor, { store }).options, ID)).rejects.toThrow(
+      `${ID}: the saved state has ${field} `,
+    );
+    expect(calls).toHaveLength(0);
+    expect(readFileSync(join(folder(repo), "job.json"), "utf8")).toBe(before);
+    expect(existsSync(worktreeOf(repo))).toBe(false);
+    expect(sh(repo, "branch", "--list")).not.toContain("factory/");
+  });
+
+  it("throws when there is no saved row or no store", async () => {
+    const repo = makeRepo();
+    const { executor } = fake(repo);
+    await expect(resumeJob(options(repo, executor, { store: memoryStore().store }).options, ID)).rejects.toThrow(
+      `${ID}: no saved job for ${repo}`,
+    );
+    await expect(resumeJob(options(repo, executor).options, ID)).rejects.toThrow(/job store/);
+  });
+});
+
+describe("a store on approveJob and reworkJob", () => {
+  it("creates the row for a job run without one and saves the fresh builder's session", async () => {
+    const repo = makeRepo();
+    const first = fake(repo, { build: () => "STATUS: BLOCKED\n" });
+    await runJob(options(repo, first.executor).options, { id: ID, feature: "Do X" });
+    const { store, row } = memoryStore();
+    const second = fake(repo);
+    const job = await reworkJob(options(repo, second.executor, { store }).options, ID, "note");
+    expect(job.stage).toBe("merged");
+    expect(row(repo)?.state).toMatchObject({ awaiting: "nothing", job: { stage: "merged" } });
+    expect(row(repo)?.sessions[builderName(ID)]).toBe("session-1");
   });
 });

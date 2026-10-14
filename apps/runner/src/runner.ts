@@ -3,6 +3,7 @@
 import { mkdir, readFile, readdir } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import {
+  MAX_RESUMES,
   STAGES,
   nextReworkNumber,
   parseAgentDirectory,
@@ -15,6 +16,7 @@ import type {
   Action,
   AgentDefinition,
   AgentName,
+  Awaiting,
   JobState,
   OrchestratorEvent,
   OrchestratorState,
@@ -24,12 +26,16 @@ import type {
 import type { AgentCall, AgentExecutor } from "./executor.js";
 import { git, run } from "./git.js";
 import { createJobDir, isValidJobId, jobFolder, writeJobFile } from "./jobFolder.js";
+import type { JobStore, SavedJob } from "./jobStore.js";
+import type { JobQueue } from "./queue.js";
 
 export interface RunnerOptions {
   repo: string;
   executor: AgentExecutor;
   notify: (message: string) => void;
   setup?: string[];
+  // When set, drive saves the state and in-flight actions after every step, and builder session ids as they arrive.
+  store?: JobStore;
 }
 
 interface Context {
@@ -41,24 +47,71 @@ interface Context {
   roles: Map<string, { provider: ProviderConfig; model?: string }>;
   // Builder session ids by spawnAgent name, for resumeBuilder. In memory for one entry-point call.
   sessions: Map<string, string>;
+  // Resolves once drive has saved the job's row, so saveSession never runs before the row exists.
+  saved: Promise<void>;
+  markSaved: () => void;
+  // Set by resumeJob: in-flight actions are being run again after a restart.
+  resumed: boolean;
 }
 
 // An event-producing action in flight. It resolves to itself so the loop can drop it from the running set.
 type Task = Promise<{ task: Task; event: OrchestratorEvent }>;
 
+// The actions answered by an event; the others are side effects only.
+const EVENT_ACTIONS: ReadonlySet<string> = new Set<Action["type"]>([
+  "createWorktree",
+  "spawnAgent",
+  "resumeBuilder",
+  "checkMainCheckout",
+  "merge",
+  "removeWorktree",
+]);
+
+const AWAITING: Record<Awaiting, true> = {
+  worktree: true,
+  "spec-writer": true,
+  builder: true,
+  reviewers: true,
+  approver: true,
+  "main-checkout": true,
+  merge: true,
+  "worktree-remove": true,
+  nothing: true,
+};
+
 export async function runJob(options: RunnerOptions, input: { id: string; feature: string }): Promise<JobState> {
   const ctx = await context(options, input.id);
-  await mkdir(join(ctx.repo, "factory", "jobs"), { recursive: true });
-  const folder = jobFolder(ctx.repo, ctx.id);
-  try {
-    await mkdir(folder);
-  } catch (error) {
-    if (errorCode(error) === "EEXIST") {
-      throw Object.assign(new Error(`${ctx.id}: job folder already exists: ${folder}`), { code: "EEXIST" });
-    }
-    throw error;
-  }
+  await reserveJobFolder(ctx);
   return drive(ctx, startJob({ id: ctx.id, feature: input.feature, repo: ctx.repo }));
+}
+
+// Creates the job the way runJob does, but leaves the running to a worker: job.json, the saved row, then one queue message.
+export async function enqueueJob(
+  options: RunnerOptions,
+  queue: JobQueue,
+  input: { id: string; feature: string },
+): Promise<JobState> {
+  const store = requireStore(options);
+  const ctx = await context(options, input.id);
+  await reserveJobFolder(ctx);
+  const { state, actions } = startJob({ id: ctx.id, feature: input.feature, repo: ctx.repo });
+  await writeJobFile(ctx.repo, ctx.id, join(jobFolder(ctx.repo, ctx.id), "job.json"), jobJson(state.job));
+  await store.save(ctx.repo, ctx.id, { feature: input.feature, state, inFlight: actions.filter(isEventAction) });
+  await queue.send({ repo: ctx.repo, id: ctx.id });
+  return state.job;
+}
+
+// Drives a saved job on from its row: rewrites job.json, then runs the in-flight actions again (at least once).
+export async function resumeJob(options: RunnerOptions, id: string): Promise<JobState> {
+  const store = requireStore(options);
+  const ctx = await context(options, id);
+  const saved = await store.load(ctx.repo, ctx.id);
+  if (saved === null) throw new Error(`${ctx.id}: no saved job for ${ctx.repo}`);
+  const state = savedState(ctx, saved);
+  if (state.awaiting === "nothing") return state.job;
+  for (const [name, sessionId] of Object.entries(saved.sessions)) ctx.sessions.set(name, sessionId);
+  ctx.resumed = true;
+  return drive(ctx, { state, actions: [{ type: "writeJob", job: state.job }, ...saved.inFlight] });
 }
 
 export async function approveJob(options: RunnerOptions, id: string): Promise<JobState> {
@@ -78,7 +131,29 @@ async function context(options: RunnerOptions, id: string): Promise<Context> {
   if (!isValidJobId(id)) throw new Error(`Invalid job id: ${JSON.stringify(id)}`);
   const repo = resolve(options.repo);
   const agents = await loadAgents(repo);
-  return { repo, id, options, agents, roles: await loadRoles(repo, agents), sessions: new Map() };
+  const roles = await loadRoles(repo, agents);
+  let markSaved = (): void => undefined;
+  const saved = new Promise<void>((done) => (markSaved = done));
+  return { repo, id, options, agents, roles, sessions: new Map(), saved, markSaved, resumed: false };
+}
+
+function requireStore(options: RunnerOptions): JobStore {
+  if (options.store === undefined) throw new Error("This needs a job store (RunnerOptions.store)");
+  return options.store;
+}
+
+// Reserves the id: the folder's mkdir fails with EEXIST when another session took it.
+async function reserveJobFolder(ctx: Context): Promise<void> {
+  await mkdir(join(ctx.repo, "factory", "jobs"), { recursive: true });
+  const folder = jobFolder(ctx.repo, ctx.id);
+  try {
+    await mkdir(folder);
+  } catch (error) {
+    if (errorCode(error) === "EEXIST") {
+      throw Object.assign(new Error(`${ctx.id}: job folder already exists: ${folder}`), { code: "EEXIST" });
+    }
+    throw error;
+  }
 }
 
 // Agent definitions come from the main checkout, so a job branch cannot change its own agents.
@@ -121,46 +196,99 @@ async function loadRoles(
 async function loadState(ctx: Context): Promise<OrchestratorState> {
   const file = join(jobFolder(ctx.repo, ctx.id), "job.json");
   const job = JSON.parse(await readFile(file, "utf8")) as JobState;
-  // branch and worktree reach git argv and the agents' cwd, so they must be the values startJob gives this repo and id.
-  const expected = startJob({ id: ctx.id, feature: job.feature, repo: ctx.repo }).state.job;
-  const reject = (field: string, value: unknown): never => {
-    throw new Error(`${ctx.id}: ${file} has ${field} ${JSON.stringify(value)}`);
+  checkJob(ctx, job, file);
+  return stateFromJob(job, ctx.repo);
+}
+
+function rejecter(ctx: Context, source: string): (field: string, value: unknown) => never {
+  return (field, value) => {
+    throw new Error(`${ctx.id}: ${source} has ${field} ${JSON.stringify(value)}`);
   };
+}
+
+// branch and worktree reach git argv and the agents' cwd, so they must be the values startJob gives this repo and id.
+function checkJob(ctx: Context, job: JobState, source: string): void {
+  const reject = rejecter(ctx, source);
+  if (typeof job !== "object" || job === null) reject("job", job);
+  const expected = startJob({ id: ctx.id, feature: job.feature, repo: ctx.repo }).state.job;
   if (job.id !== ctx.id) reject("id", job.id);
   if (job.branch !== expected.branch) reject("branch", job.branch);
   if (job.worktree !== expected.worktree) reject("worktree", job.worktree);
   if (!Number.isInteger(job.round) || job.round < 0) reject("round", job.round);
   if (!(STAGES as readonly unknown[]).includes(job.stage)) reject("stage", job.stage);
-  return stateFromJob(job, ctx.repo);
+}
+
+// A saved row is checked like job.json, and its in-flight actions may only be event-producing ones on the job's branch and worktree.
+function savedState(ctx: Context, saved: SavedJob): OrchestratorState {
+  const source = "the saved state";
+  const reject = rejecter(ctx, source);
+  const { state, inFlight, sessions } = saved;
+  if (typeof state !== "object" || state === null) reject("state", state);
+  if (state.repo !== ctx.repo) reject("repo", state.repo);
+  checkJob(ctx, state.job, source);
+  if (typeof state.awaiting !== "string" || !Object.hasOwn(AWAITING, state.awaiting)) reject("awaiting", state.awaiting);
+  if (!Number.isInteger(state.resumes) || state.resumes < 0 || state.resumes > MAX_RESUMES) {
+    reject("resumes", state.resumes);
+  }
+  if (!Array.isArray(inFlight)) reject("in-flight actions", inFlight);
+  for (const action of inFlight) {
+    if (!isEventAction(action)) reject("in-flight action", action);
+    if ("branch" in action && action.branch !== state.job.branch) reject("in-flight branch", action.branch);
+    if ("worktree" in action && action.worktree !== state.job.worktree) reject("in-flight worktree", action.worktree);
+  }
+  if (typeof sessions !== "object" || sessions === null || Object.values(sessions).some((s) => typeof s !== "string")) {
+    reject("sessions", sessions);
+  }
+  return state;
+}
+
+function isEventAction(action: Action): boolean {
+  return typeof action === "object" && action !== null && EVENT_ACTIONS.has(action.type);
 }
 
 async function drive(ctx: Context, first: Transition): Promise<JobState> {
   let state = first.state;
-  const running = new Set<Task>();
+  // Each running task with the action it answers.
+  const running = new Map<Task, Action>();
   await execute(ctx, state, first.actions, running);
+  await save(ctx, state, running);
   // Events are applied one at a time, in the order their actions finish.
   while (state.awaiting !== "nothing") {
     if (running.size === 0) throw new Error(`${ctx.id}: awaiting ${state.awaiting} with nothing running`);
-    const { task, event } = await Promise.race(running);
+    const { task, event } = await Promise.race(running.keys());
     running.delete(task);
     const next = transition(state, event);
     state = next.state;
     await execute(ctx, state, next.actions, running);
+    await save(ctx, state, running);
   }
   // After a stop, reviewers still running are left to settle; their events are not applied.
-  await Promise.allSettled(running);
+  await Promise.allSettled(running.keys());
   return state.job;
 }
 
-function track(running: Set<Task>, event: Promise<OrchestratorEvent>): void {
+// With a store, the row holds the state and the actions whose events are not applied yet, for resumeJob.
+async function save(ctx: Context, state: OrchestratorState, running: Map<Task, Action>): Promise<void> {
+  const store = ctx.options.store;
+  if (store === undefined) return;
+  await store.save(ctx.repo, ctx.id, { feature: state.job.feature, state, inFlight: [...running.values()] });
+  ctx.markSaved();
+}
+
+function track(running: Map<Task, Action>, action: Action, event: Promise<OrchestratorEvent>): void {
   const task: Task = event.then((result) => ({ task, event: result }));
   // A failure still reaches the loop through Promise.race; this only keeps Node from flagging it as unhandled meanwhile.
   task.catch(() => undefined);
-  running.add(task);
+  running.set(task, action);
 }
 
 // state is the state the actions were emitted with.
-async function execute(ctx: Context, state: OrchestratorState, actions: Action[], running: Set<Task>): Promise<void> {
+async function execute(
+  ctx: Context,
+  state: OrchestratorState,
+  actions: Action[],
+  running: Map<Task, Action>,
+): Promise<void> {
   const { repo, id, options } = ctx;
   const folder = jobFolder(repo, id);
   for (const action of actions) {
@@ -169,18 +297,18 @@ async function execute(ctx: Context, state: OrchestratorState, actions: Action[]
         await writeJobFile(repo, id, join(folder, "job.json"), jobJson(action.job));
         break;
       case "createWorktree":
-        track(running, Promise.resolve(await createWorktree(ctx, action.branch, action.worktree)));
+        track(running, action, Promise.resolve(await createWorktree(ctx, action.branch, action.worktree)));
         break;
       case "spawnAgent": {
         const call = agentCall(ctx, action.agent, action.prompt, state.job.worktree);
-        track(running, callAgent(ctx, action.agent, call, outputFile(state, action.agent), action.name));
+        track(running, action, callAgent(ctx, action.agent, call, outputFile(state, action.agent), action.name));
         break;
       }
       case "resumeBuilder": {
         const resume = ctx.sessions.get(action.name);
         if (resume === undefined) throw new Error(`${id}: no session to resume for ${action.name}`);
         const call = { ...agentCall(ctx, "builder", action.message, state.job.worktree), resume };
-        track(running, callAgent(ctx, "builder", call, outputFile(state, "builder")));
+        track(running, action, callAgent(ctx, "builder", call, outputFile(state, "builder")));
         break;
       }
       case "createDir":
@@ -190,7 +318,7 @@ async function execute(ctx: Context, state: OrchestratorState, actions: Action[]
         await writeJobFile(repo, id, action.path, action.content);
         break;
       case "checkMainCheckout":
-        track(running, Promise.resolve(await checkMainCheckout(ctx)));
+        track(running, action, Promise.resolve(await checkMainCheckout(ctx)));
         break;
       case "merge": {
         const merge = await git(["merge", "--no-ff", "-m", action.message, "--end-of-options", action.branch], repo);
@@ -202,7 +330,7 @@ async function execute(ctx: Context, state: OrchestratorState, actions: Action[]
               error: merge.error,
               inProgress: (await git(["rev-parse", "-q", "--verify", "--end-of-options", "MERGE_HEAD"], repo)).ok,
             };
-        track(running, Promise.resolve(event));
+        track(running, action, Promise.resolve(event));
         break;
       }
       case "abortMerge": {
@@ -213,7 +341,7 @@ async function execute(ctx: Context, state: OrchestratorState, actions: Action[]
       case "removeWorktree": {
         const remove = await git(["worktree", "remove", "--end-of-options", action.worktree], repo);
         const output = remove.ok ? `${remove.stdout}${remove.stderr}`.trim() : remove.error;
-        track(running, Promise.resolve({ type: "worktreeRemoved", ok: remove.ok, output }));
+        track(running, action, Promise.resolve({ type: "worktreeRemoved", ok: remove.ok, output }));
         break;
       }
       case "deleteBranch": {
@@ -266,24 +394,44 @@ async function callAgent(
   file: string,
   name?: string,
 ): Promise<OrchestratorEvent> {
+  let sessionId: string | undefined;
   try {
-    const { sessionId } = await ctx.options.executor(call);
-    if (name !== undefined) ctx.sessions.set(name, sessionId);
+    ({ sessionId } = await ctx.options.executor(call));
   } catch (error) {
     ctx.options.notify(`${ctx.id}: ${agent} failed: ${errorMessage(error)}`);
+  }
+  if (name !== undefined && sessionId !== undefined) {
+    ctx.sessions.set(name, sessionId);
+    const store = ctx.options.store;
+    if (store !== undefined) {
+      await ctx.saved;
+      await store.saveSession(ctx.repo, ctx.id, name, sessionId);
+    }
   }
   return { type: "agentDone", agent, content: await readIfExists(file) };
 }
 
 async function createWorktree(ctx: Context, branch: string, worktree: string): Promise<OrchestratorEvent> {
-  const add = await git(["worktree", "add", "-b", branch, "--end-of-options", worktree, "main"], ctx.repo);
-  if (!add.ok) return { type: "worktreeCreated", ok: false, error: add.error };
+  if (!(ctx.resumed && (await hasWorktree(ctx.repo, branch, worktree)))) {
+    const add = await git(["worktree", "add", "-b", branch, "--end-of-options", worktree, "main"], ctx.repo);
+    if (!add.ok) return { type: "worktreeCreated", ok: false, error: add.error };
+  }
   const [command, ...args] = ctx.options.setup ?? [];
   if (command !== undefined) {
     const setup = await run(command, args, worktree);
     if (!setup.ok) return { type: "worktreeCreated", ok: false, error: setup.error };
   }
   return { type: "worktreeCreated", ok: true };
+}
+
+// After a restart, a worktree registered at worktree on branch means git worktree add already ran.
+async function hasWorktree(repo: string, branch: string, worktree: string): Promise<boolean> {
+  const list = await git(["worktree", "list", "--porcelain"], repo);
+  if (!list.ok) return false;
+  return list.stdout.split("\n\n").some((block) => {
+    const lines = block.split("\n");
+    return lines.includes(`worktree ${worktree}`) && lines.includes(`branch refs/heads/${branch}`);
+  });
 }
 
 async function checkMainCheckout(ctx: Context): Promise<OrchestratorEvent> {

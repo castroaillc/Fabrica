@@ -8,6 +8,11 @@
   },
   "dependencies": {
     "@anthropic-ai/claude-agent-sdk": "^0.3.296",
-    "@fabrica/core": "workspace:*"
+    "@fabrica/core": "workspace:*",
+    "pg": "^8.23.1",
+    "pg-boss": "^12.37.1"
+  },
+  "devDependencies": {
+    "@types/pg": "^8.23.1"
   }
 }
