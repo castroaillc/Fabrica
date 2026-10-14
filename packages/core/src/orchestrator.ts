@@ -53,7 +53,8 @@ export type Action =
   | { type: "notify"; message: string };
 
 export type OrchestratorEvent =
-  | ({ type: "worktreeCreated" } & ({ ok: true } | { ok: false; error: string }))
+  // step tells a failed git worktree add from a failed setup command (fabrica.yaml setup).
+  | ({ type: "worktreeCreated" } & ({ ok: true } | { ok: false; step: "add" | "setup"; error: string }))
   | { type: "agentDone"; agent: AgentName; content: string | null }
   | { type: "mainCheckout"; porcelain: string; branch: string }
   | ({ type: "mergeDone" } & ({ ok: true } | { ok: false; error: string; inProgress: boolean }))
@@ -102,7 +103,9 @@ export function transition(state: OrchestratorState, event: OrchestratorEvent): 
   switch (state.awaiting) {
     case "worktree":
       if (event.type === "worktreeCreated") {
-        return event.ok ? onWorktreeCreated(state) : stop(state, `worktree setup failed: ${event.error}`);
+        if (event.ok) return onWorktreeCreated(state);
+        if (event.step === "setup") return needsHuman(state, "the worktree setup command failed", event.error);
+        return stop(state, `worktree setup failed: ${event.error}`);
       }
       break;
     case "spec-writer":

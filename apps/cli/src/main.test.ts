@@ -6,7 +6,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { REVIEWERS } from "@fabrica/core";
 import type { JobState } from "@fabrica/core";
 import { runJob } from "@fabrica/runner";
-import type { AgentCall, AgentExecutor } from "@fabrica/runner";
+import type { AgentCall, AgentExecutor, SetupRequest } from "@fabrica/runner";
 import { main, slug } from "./main.js";
 
 // runJob stays the real one; the EEXIST test wraps a single call to create the folder just before it runs.
@@ -157,6 +157,29 @@ describe("run", () => {
     expect(code).toBe(1);
     expect(err).toHaveLength(1);
     expect(err[0]).toMatch(/^fabrica: .*ENOENT/);
+  });
+
+  it("runs fabrica.yaml's setup through the given runSetup once, in the job's worktree", async () => {
+    const repo = makeRepo();
+    writeFileSync(join(repo, "fabrica.yaml"), "setup: [pnpm, install]\n");
+    sh(repo, "add", "fabrica.yaml");
+    sh(repo, "commit", "-q", "-m", "Add setup");
+    const requests: SetupRequest[] = [];
+    const out: string[] = [];
+    const code = await main(["run", "Set", "up"], {
+      cwd: repo,
+      executor: fake(repo).executor,
+      runSetup: async (request) => {
+        requests.push(request);
+        return { ok: true, output: "" };
+      },
+      out: (l) => out.push(l),
+      err: (l) => out.push(l),
+    });
+    expect(code).toBe(0);
+    expect(out.at(-1)).toBe("001-set-up: merged");
+    expect(requests).toHaveLength(1);
+    expect(requests[0]).toMatchObject({ command: ["pnpm", "install"], cwd: join(repo, "..", "app-factory", "001-set-up") });
   });
 });
 

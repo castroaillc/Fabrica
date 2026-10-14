@@ -236,12 +236,22 @@ describe("build check and file errors", () => {
     expect(note).toContain(blocked);
   });
 
-  it("stops on a failed worktree setup", () => {
+  it("stops on a failed git worktree add, leaving stage spec", () => {
     const from = start();
-    const t = step(from, { type: "worktreeCreated", ok: false, error: "pnpm install failed" });
+    const t = step(from, { type: "worktreeCreated", ok: false, step: "add", error: "branch already exists" });
     expectStopped(from, t);
     expect(t.state.job.stage).toBe("spec");
-    expect(notes(t.actions)[0]).toContain("pnpm install failed");
+    expect(notes(t.actions)[0]).toContain("branch already exists");
+  });
+
+  it("hands a failed setup command to a human with its output, spawning no agent", () => {
+    const t = step(start(), { type: "worktreeCreated", ok: false, step: "setup", error: "ERR_PNPM_LOCKFILE" });
+    expect(t.state.job.stage).toBe("needs-human");
+    expect(t.state.awaiting).toBe("nothing");
+    expect(types(t.actions)).toEqual(["writeJob", "notify"]);
+    expect(notes(t.actions)[0]).toContain("the worktree setup command failed");
+    expect(notes(t.actions)[0]).toContain("ERR_PNPM_LOCKFILE");
+    expect(notes(t.actions)[0]).toContain("/r/app-factory/002-x");
   });
 
   it("stops on a missing spec.md", () => {
@@ -546,6 +556,17 @@ describe("push", () => {
     expect(failed.state.awaiting).toBe("nothing");
     expect(failed.actions).toEqual([{ type: "notify", message: "002-x: push failed: no network" }]);
     expect(types(step(failed, { type: "approve" }).actions)).toEqual(["notify", "pushBranch"]);
+  });
+
+  it("pushes the branch after a failed setup command hands the job to a human", () => {
+    const t = step(startPush(), { type: "worktreeCreated", ok: false, step: "setup", error: "boom" });
+    expect(t.state.job.stage).toBe("needs-human");
+    expect(t.state.awaiting).toBe("handoff-push");
+    expect(types(t.actions)).toEqual(["writeJob", "notify", "pushBranch"]);
+    expect(t.actions[2]).toEqual(PUSH);
+    expect(types(step(startPush(), { type: "worktreeCreated", ok: false, step: "add", error: "x" }).actions)).toEqual([
+      "notify",
+    ]);
   });
 
   it("pushes after a BLOCKED build and after exhausted rounds too, but not after a stop", () => {

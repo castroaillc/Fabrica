@@ -1,4 +1,6 @@
 # Copy to fabrica.yaml in the main checkout to pick a provider and model per agent role.
+# setup (optional): the command run once in each new job worktree, as an argv list (no shell).
+# setup: [pnpm, install, --frozen-lockfile]
 # Credentials (ANTHROPIC_API_KEY, ANTHROPIC_AUTH_TOKEN, AWS credentials, GCP ADC) come from the runner's environment.
 providers:
   claude-bedrock: { type: bedrock, region: us-east-1 }       # CLAUDE_CODE_USE_BEDROCK

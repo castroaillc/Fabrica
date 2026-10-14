@@ -7,7 +7,7 @@ export { STORE_SCHEMA, openJobStore } from "./store.js";
 export type { PostgresJobStore } from "./store.js";
 export { QUEUE_SCHEMA, openQueue, queueName, startWorker } from "./queue.js";
 export type { JobMessage, JobQueue, QueueConfig, Worker } from "./queue.js";
-export type { AgentCall, AgentExecutor } from "./executor.js";
+export type { AgentCall, AgentExecutor, SetupRequest, SetupResult, SetupRunner } from "./executor.js";
 export { sdkExecutor } from "./sdk.js";
 export { sdkQueryOptions } from "./sdkOptions.js";
 export { dockerExecutor, dockerLauncher } from "./docker.js";

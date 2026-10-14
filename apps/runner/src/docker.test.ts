@@ -354,3 +354,47 @@ describe("dockerExecutor", () => {
     expect(fake.removed).toEqual([fake.ensured[0]?.name]);
   });
 });
+
+describe("dockerExecutor setup", () => {
+  const SETUP = ["pnpm", "install", "--frozen-lockfile", "a b; echo $HOME"];
+
+  function setupFor(repo: string, worktree: string, id = ID) {
+    return { command: SETUP, cwd: worktree, jobId: id, jobFolder: join(repo, "factory", "jobs", id) };
+  }
+
+  it("ensures the same container an agent call for the job ensures, and the agent call reuses it", async () => {
+    const { repo, worktree } = makeRepo();
+    const fake = fakeLauncher();
+    const { executor, setup } = dockerExecutor({ launcher: fake.launcher, env: HOST_ENV });
+    await setup(setupFor(repo, worktree(ID)));
+    await executor(callFor(repo, worktree(ID)));
+    const [forSetup, forAgent] = fake.ensured;
+    expect(forSetup).toBeDefined();
+    expect(forSetup).toEqual(forAgent);
+    expect(fake.execs.map((exec) => exec.container)).toEqual([forSetup?.name, forSetup?.name]);
+  });
+
+  it("execs the argv verbatim in the worktree with an empty env and no stdin, credentials and identity aside", async () => {
+    const { repo, worktree } = makeRepo();
+    const fake = fakeLauncher({ ok: true, stdout: "installed\n", stderr: "" });
+    const { setup } = dockerExecutor({ launcher: fake.launcher, env: HOST_ENV });
+    expect(await setup(setupFor(repo, worktree(ID)))).toEqual({ ok: true, output: "installed" });
+    const [request] = fake.execs;
+    if (request === undefined) throw new Error("no exec");
+    expect(request.command).toEqual(SETUP);
+    expect(request.cwd).toBe(worktree(ID));
+    expect(request.env).toEqual({});
+    expect(request.stdin).toBe("");
+    const exec = execArgs(request);
+    expect(exec).not.toContain("-e");
+    for (const value of [...SECRETS, ...Object.values(IDENTITY)]) expect(exec.join(" ")).not.toContain(value);
+    expect(exec.slice(-SETUP.length)).toEqual(SETUP);
+  });
+
+  it("returns ok false with both stdout and stderr when the exec fails", async () => {
+    const { repo, worktree } = makeRepo();
+    const fake = fakeLauncher({ ok: false, stdout: "  resolving\n", stderr: "ERR_PNPM_LOCKFILE\n" });
+    const { setup } = dockerExecutor({ launcher: fake.launcher, env: HOST_ENV });
+    expect(await setup(setupFor(repo, worktree(ID)))).toEqual({ ok: false, output: "resolving\nERR_PNPM_LOCKFILE" });
+  });
+});
