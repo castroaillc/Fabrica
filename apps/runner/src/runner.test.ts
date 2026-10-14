@@ -206,6 +206,8 @@ describe("runJob", () => {
       expect(call.agent.tools).toEqual(parsed.tools);
       expect(call.agent.model).toBe(parsed.model);
       expect(call.cwd).toBe(worktreeOf(repo));
+      expect(call.jobId).toBe(ID);
+      expect(call.jobFolder).toBe(folder(repo));
       expect(call.resume).toBeUndefined();
     }
   });
@@ -382,6 +384,40 @@ describe("runJob", () => {
     const job = await runJob(opts, { id: ID, feature: "Do X" });
     expect(notes.some((n) => n.includes("spec-writer failed: model overloaded"))).toBe(true);
     expect(job.stage).toBe("merged");
+  });
+
+  it("calls teardown once, after the worktree is removed", async () => {
+    const repo = makeRepo();
+    const { executor } = fake(repo);
+    const torn: { id: string; worktree: boolean }[] = [];
+    const teardown = async (id: string) => {
+      torn.push({ id, worktree: existsSync(worktreeOf(repo)) });
+    };
+    const job = await runJob(options(repo, executor, { teardown }).options, { id: ID, feature: "Do X" });
+    expect(job.stage).toBe("merged");
+    expect(torn).toEqual([{ id: ID, worktree: false }]);
+  });
+
+  it("reports a failing teardown through notify without changing the outcome", async () => {
+    const repo = makeRepo();
+    const { executor } = fake(repo);
+    const teardown = async () => {
+      throw new Error("docker rm failed");
+    };
+    const { options: opts, notes } = options(repo, executor, { teardown });
+    const job = await runJob(opts, { id: ID, feature: "Do X" });
+    expect(job.stage).toBe("merged");
+    expect(notes).toContain(`${ID}: teardown failed: docker rm failed`);
+  });
+
+  it("runs no teardown in host mode, where there is no hook", async () => {
+    const repo = makeRepo();
+    const { executor } = fake(repo);
+    const { options: opts, notes } = options(repo, executor);
+    const job = await runJob(opts, { id: ID, feature: "Do X" });
+    expect("teardown" in opts).toBe(false);
+    expect(job.stage).toBe("merged");
+    expect(notes.some((n) => n.includes("teardown"))).toBe(false);
   });
 });
 

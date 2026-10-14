@@ -36,6 +36,8 @@ export interface RunnerOptions {
   setup?: string[];
   // When set, drive saves the state and in-flight actions after every step, and builder session ids as they arrive.
   store?: JobStore;
+  // Called after a successful removeWorktree, for example to remove the job's container in Docker mode.
+  teardown?: (id: string) => Promise<void>;
 }
 
 interface Context {
@@ -341,6 +343,13 @@ async function execute(
       case "removeWorktree": {
         const remove = await git(["worktree", "remove", "--end-of-options", action.worktree], repo);
         const output = remove.ok ? `${remove.stdout}${remove.stderr}`.trim() : remove.error;
+        if (remove.ok && options.teardown !== undefined) {
+          try {
+            await options.teardown(id);
+          } catch (error) {
+            options.notify(`${id}: teardown failed: ${errorMessage(error)}`);
+          }
+        }
         track(running, action, Promise.resolve({ type: "worktreeRemoved", ok: remove.ok, output }));
         break;
       }
@@ -367,9 +376,11 @@ function definition(ctx: Context, agent: AgentName): AgentDefinition {
   return found;
 }
 
-// A call with the agent's definition, plus its provider and model when fabrica.yaml lists its role.
+// A call with the agent's definition, the job's id and folder, plus its provider and model when fabrica.yaml lists
+// its role.
 function agentCall(ctx: Context, agent: AgentName, prompt: string, cwd: string): AgentCall {
-  return { agent: definition(ctx, agent), prompt, cwd, ...ctx.roles.get(agent) };
+  const folder = jobFolder(ctx.repo, ctx.id);
+  return { agent: definition(ctx, agent), prompt, cwd, jobId: ctx.id, jobFolder: folder, ...ctx.roles.get(agent) };
 }
 
 // The file each agent writes in the job folder. A reviewer's round is the round it was spawned in.
