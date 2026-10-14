@@ -3,3 +3,28 @@ packages:
   - "apps/*"
 allowBuilds:
   esbuild: false
+  sharp: true
+  # Carbon / IBM Plex postinstall scripts only run IBM telemetry
+  "@carbon/colors": false
+  "@carbon/feature-flags": false
+  "@carbon/grid": false
+  "@carbon/icon-helpers": false
+  "@carbon/icons-react": false
+  "@carbon/layout": false
+  "@carbon/motion": false
+  "@carbon/react": false
+  "@carbon/styles": false
+  "@carbon/themes": false
+  "@carbon/type": false
+  "@carbon/utilities": false
+  "@ibm/plex": false
+  "@ibm/plex-mono": false
+  "@ibm/plex-sans": false
+  "@ibm/plex-sans-arabic": false
+  "@ibm/plex-sans-devanagari": false
+  "@ibm/plex-sans-hebrew": false
+  "@ibm/plex-sans-thai": false
+  "@ibm/plex-sans-thai-looped": false
+  "@ibm/plex-serif": false
+  # prebuilt binaries ship via optional deps
+  "@parcel/watcher": false

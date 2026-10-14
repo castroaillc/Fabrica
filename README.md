@@ -86,6 +86,32 @@ cards, review chips fill in as verdicts land, and jobs that need you stand out.
 Click a card to read its markdown files. It polls every two seconds, so leave it
 open while jobs run.
 
+## Web app
+
+`apps/web` (`@fabrica/web`) is a Next.js app on port 3000 built with
+[Carbon](https://carbondesignsystem.com) (`@carbon/react`),
+[Better Auth](https://better-auth.com) (email + password) and
+[Drizzle ORM](https://orm.drizzle.team) on Postgres. Its dashboard shows
+placeholder jobs for now. The repo is a pnpm + Turborepo workspace: `pnpm build`,
+`pnpm dev` and `pnpm typecheck` run through `turbo.json`.
+
+```sh
+docker compose up -d                           # Postgres 17 on localhost:5432
+cp apps/web/.env.example apps/web/.env         # then set BETTER_AUTH_SECRET (openssl rand -base64 32)
+pnpm --filter @fabrica/web db:migrate          # apply migrations in apps/web/drizzle
+pnpm --filter @fabrica/web dev
+```
+
+| Script (in `apps/web`) | Purpose                                                         |
+| ---------------------- | --------------------------------------------------------------- |
+| `db:generate`          | Create a SQL migration from changes in `lib/db/schema`          |
+| `db:migrate`           | Apply pending migrations                                        |
+| `db:push`              | Push schema straight to the DB (prototyping only)               |
+| `db:studio`            | Open Drizzle Studio                                             |
+| `auth:generate`        | Regenerate `lib/db/schema/auth.ts` after changing Better Auth plugins |
+
+Run one with `pnpm --filter @fabrica/web <script>`.
+
 ## The example jobs
 
 Both came from running the factory on [zazencodes.com](https://zazencodes.com),

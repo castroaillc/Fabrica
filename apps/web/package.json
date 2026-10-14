@@ -1,0 +1,40 @@
+{
+  "name": "@fabrica/web",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "next dev --port 3000",
+    "build": "next build",
+    "start": "next start --port 3000",
+    "typecheck": "next typegen && tsc --noEmit",
+    "clean": "rm -rf .next .turbo",
+    "db:generate": "drizzle-kit generate",
+    "db:migrate": "drizzle-kit migrate",
+    "db:push": "drizzle-kit push",
+    "db:studio": "drizzle-kit studio",
+    "auth:generate": "auth generate --config lib/auth.ts --output lib/db/schema/auth.ts --yes"
+  },
+  "dependencies": {
+    "@carbon/react": "^1.118.0",
+    "@ibm/plex-mono": "2.5.0",
+    "@ibm/plex-sans": "1.1.0",
+    "better-auth": "^1.7.7",
+    "drizzle-orm": "^0.45.4",
+    "next": "^16.4.0",
+    "pg": "^8.23.1",
+    "react": "^19.3.0",
+    "react-dom": "^19.3.0"
+  },
+  "devDependencies": {
+    "@types/node": "^26.6.5",
+    "@types/pg": "^8.23.1",
+    "@types/react": "^19.3.0",
+    "@types/react-dom": "^19.3.0",
+    "auth": "^1.7.7",
+    "dotenv": "^18.0.7",
+    "drizzle-kit": "^0.31.11",
+    "sass": "^1.105.1",
+    "typescript": "^6.0.3"
+  }
+}
