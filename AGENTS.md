@@ -19,9 +19,11 @@ packages/core/                   @fabrica/core: types and pure logic (no I/O)
                                  orchestrator state machine: transition(state, event) → actions for a runner, plus prompts and ports)
 apps/                            runnable apps (runner, cli) as they are added
 apps/runner/                     @fabrica/runner: the local runner that executes core's actions on the host (git worktrees, Agent SDK agents, job.json),
-                                 plus the Postgres job queue (pg-boss) and job store a worker resumes jobs from
+                                 plus the Postgres job queue (pg-boss) and job store a worker resumes jobs from,
+                                 and Docker mode: agent calls run in one fabrica/job container per job
 apps/cli/                        @fabrica/cli: the fabrica command (run, next, approve, rework, status) driving apps/runner, run from sources through tsx
 apps/web/                        @fabrica/web: Next.js web app (Carbon, Better Auth, Drizzle on Postgres); the dashboard shows placeholder jobs
+images/job/                      the fabrica/job image for Docker mode: Dockerfile (git, node 24 + pnpm, the Agent SDK) and agent.mjs
 turbo.json                       Turborepo tasks (build, dev, typecheck, clean) run by the root scripts
 docker-compose.yml               dev Postgres 17 for apps/web and the runner's queue and job store (user, password and database `fabrica`)
 ```
@@ -129,6 +131,60 @@ DATABASE_URL=postgres://fabrica:fabrica@127.0.0.1:5432/fabrica pnpm test
 ```
 
 They use their own throwaway schemas and drop them afterwards.
+
+## Runner modes
+
+`FABRICA_RUNNER_MODE` picks where agent calls run, for every command
+including `fabrica worker`:
+
+- unset, empty or `host` (the default): in the runner process, as before.
+- `docker`: in one container per job, through the `docker` CLI and the
+  Docker socket. Any other value is an error.
+
+Build the image first, from the repo root:
+
+```bash
+docker build -t fabrica/job images/job
+FABRICA_RUNNER_MODE=docker fabrica run <feature...>
+```
+
+A job's container (`fabrica-<hash of the job folder>-<job-id>`) is created on
+its first agent call from `fabrica/job`, idles, and runs each call as
+`docker exec ... node /opt/fabrica/agent.mjs`. It runs as the host user's
+uid:gid, without `--privileged`. Only the orchestrator's agent calls move into
+it: worktrees, merges and job.json stay on the host.
+
+Mounts, read-write at the same path as on the host, and nothing else (no rest
+of the main checkout, no home directory, `~/.claude`, `~/.gitconfig` or Docker
+socket):
+
+- the job's worktree,
+- the job folder `<repo>/factory/jobs/<id>/`,
+- the repo's git common dir (`<repo>/.git`), which git in a worktree needs.
+
+Env: no host variable reaches the container except these, and their values
+never appear on the docker command line:
+
+- the provider's routing variables (as in host mode, see Model providers);
+- its credentials, when set and non-empty in the runner's env:
+  - no provider or `anthropic`: `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`,
+    `CLAUDE_CODE_OAUTH_TOKEN`
+  - `anthropic-compatible`: `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`
+  - `bedrock`: `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`,
+    `AWS_SESSION_TOKEN`, `AWS_BEARER_TOKEN_BEDROCK`
+- `GIT_AUTHOR_*` / `GIT_COMMITTER_*` from the repo's `git config user.name`
+  and `user.email`, so the builder can commit.
+
+Vertex is not supported in Docker mode yet (it needs an ADC file): a Vertex
+role fails without running. A gateway `base_url` on `localhost` means the
+container itself, not the host. The container is removed when the job's
+worktree is removed; one left by a failed job can be removed with
+`docker rm -f <name>`.
+
+The Docker integration test in `apps/runner/src/docker.integration.test.ts`
+is skipped unless `docker image inspect fabrica/job` succeeds. To run it,
+build the image as above, then `pnpm test -- docker`. It removes its
+container afterwards.
 
 ## Model providers
 
