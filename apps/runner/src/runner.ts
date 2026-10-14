@@ -38,7 +38,8 @@ export interface RunnerOptions {
   store?: JobStore;
   // Called after a successful removeWorktree, for example to remove the job's container in Docker mode.
   teardown?: (id: string) => Promise<void>;
-  // Docker mode: agents can write the repo's git dir, so host git runs with fsmonitor and hooks turned off.
+  // Docker mode: agents can write parts of the repo's git dir, so host git runs with fsmonitor and hooks turned off
+  // and with the main checkout's .git as its common dir.
   hardenGit?: boolean;
 }
 
@@ -156,12 +157,12 @@ function requireStore(options: RunnerOptions): JobStore {
 
 // A push remote must be a remote name configured in the main checkout, never a URL or an option.
 async function checkRemote(ctx: Context, remote: string | undefined): Promise<void> {
-  if (remote !== undefined && !(await remotes(ctx.repo)).includes(remote)) throw new Error(`no remote named ${remote}`);
+  if (remote !== undefined && !(await remotes(ctx)).includes(remote)) throw new Error(`no remote named ${remote}`);
 }
 
-async function remotes(repo: string): Promise<string[]> {
-  const list = await git(["remote"], repo);
-  if (!list.ok) throw new Error(`git remote failed in ${repo}: ${list.error}`);
+async function remotes(ctx: Context): Promise<string[]> {
+  const list = await hostGit(ctx.options, ["remote"], ctx.repo);
+  if (!list.ok) throw new Error(`git remote failed in ${ctx.repo}: ${list.error}`);
   return list.stdout.split("\n").filter((name) => name !== "");
 }
 
@@ -487,8 +488,9 @@ async function pushBranch(ctx: Context, remote: string, branch: string): Promise
   if (branch !== `factory/${id}`) {
     return { type: "pushDone", ok: false, error: `refusing to push ${branch}: only factory/${id} may be pushed` };
   }
-  if (!(await remotes(repo)).includes(remote)) return { type: "pushDone", ok: false, error: `no remote named ${remote}` };
-  const push = await git(["push", "--end-of-options", remote, `refs/heads/${branch}:refs/heads/${branch}`], repo);
+  if (!(await remotes(ctx)).includes(remote)) return { type: "pushDone", ok: false, error: `no remote named ${remote}` };
+  const refspec = `refs/heads/${branch}:refs/heads/${branch}`;
+  const push = await hostGit(ctx.options, ["push", "--end-of-options", remote, refspec], repo);
   return push.ok ? { type: "pushDone", ok: true } : { type: "pushDone", ok: false, error: push.error };
 }
 
@@ -502,9 +504,11 @@ async function checkMainCheckout(ctx: Context): Promise<OrchestratorEvent> {
 
 const HARDENED_GIT: readonly string[] = ["-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null"];
 
-// Git passes -c settings on to the git processes it starts, so they cover worktree remove's status check too.
+// Git passes -c settings and its env on to the git processes it starts, so they cover worktree remove's status check
+// too. GIT_COMMON_DIR overrides any commondir file an agent may have planted in the main checkout's git dir.
 function hostGit(options: RunnerOptions, args: readonly string[], cwd: string) {
-  return git(options.hardenGit ? [...HARDENED_GIT, ...args] : args, cwd);
+  if (!options.hardenGit) return git(args, cwd);
+  return git([...HARDENED_GIT, ...args], cwd, { GIT_COMMON_DIR: join(cwd, ".git") });
 }
 
 async function readIfExists(file: string): Promise<string | null> {

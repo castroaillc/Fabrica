@@ -9,15 +9,22 @@ export interface RunResult {
   error: string;
 }
 
-export function run(command: string, args: readonly string[], cwd: string): Promise<RunResult> {
+// env adds variables on top of the runner's own env.
+export function run(
+  command: string,
+  args: readonly string[],
+  cwd: string,
+  env?: Record<string, string>,
+): Promise<RunResult> {
   return new Promise((done) => {
-    execFile(command, args, { cwd, encoding: "utf8" }, (error, stdout, stderr) => {
+    const options = { cwd, encoding: "utf8" as const, ...(env && { env: { ...process.env, ...env } }) };
+    execFile(command, args, options, (error, stdout, stderr) => {
       const text = error ? stderr.trim() || stdout.trim() || error.message : "";
       done({ ok: error === null, stdout, stderr, error: text });
     });
   });
 }
 
-export function git(args: readonly string[], cwd: string): Promise<RunResult> {
-  return run("git", args, cwd);
+export function git(args: readonly string[], cwd: string, env?: Record<string, string>): Promise<RunResult> {
+  return run("git", args, cwd, env);
 }
