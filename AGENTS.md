@@ -18,6 +18,7 @@ packages/core/                   @fabrica/core: types and pure logic (no I/O)
                                  orchestrator state machine: transition(state, event) → actions for a runner, plus prompts and ports)
 apps/                            runnable apps (runner, cli) as they are added
 apps/runner/                     @fabrica/runner: the local runner that executes core's actions on the host (git worktrees, Agent SDK agents, job.json)
+apps/cli/                        @fabrica/cli: the fabrica command (run, next, approve, rework, status) driving apps/runner, run from sources through tsx
 ```
 
 - `packages/*` and `apps/*` are pnpm workspace packages. Each has a
@@ -48,6 +49,24 @@ pnpm check       # both; must pass before every commit
 
 There is no linter or formatter yet; match the surrounding style (2-space
 indent, double quotes, semicolons, ES modules, `import type` for types).
+
+## CLI
+
+`apps/cli` mirrors the `/factory` commands in `SKILL.md`:
+
+```bash
+fabrica run <feature...>            # /factory <feature>
+fabrica next                        # /factory next
+fabrica approve <job-id>            # /factory approve <job-id>
+fabrica rework <job-id> <note...>   # /factory rework <job-id> <note>
+fabrica status                      # one line per job in factory/jobs/
+```
+
+Run it from inside the target repo (the repo is `git rev-parse --show-toplevel`
+of the current directory) as `node <fabrica>/apps/cli/bin/fabrica.js <command>`,
+or as `fabrica <command>` once linked, for example with
+`pnpm --filter @fabrica/cli link --global`. The CLI runs no setup command in new
+worktrees: dependencies are not installed there, unlike `SKILL.md` step 2.
 
 ## Dev server
 
