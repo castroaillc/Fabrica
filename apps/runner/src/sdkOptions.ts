@@ -7,7 +7,9 @@ export function sdkQueryOptions(call: AgentCall): Options {
     systemPrompt: call.agent.prompt,
     cwd: call.cwd,
     permissionMode: "dontAsk",
-    settingSources: ["project"],
+    // No filesystem settings: project settings resolve against cwd, which is the job branch's worktree, so its
+    // CLAUDE.md, .claude/settings.json and hooks would let a job change its own reviewers. The agent file is the prompt.
+    settingSources: [],
   };
   if (call.agent.tools !== undefined) {
     options.tools = [...call.agent.tools];

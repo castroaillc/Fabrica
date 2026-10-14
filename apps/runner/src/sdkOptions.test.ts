@@ -24,8 +24,16 @@ describe("sdkQueryOptions", () => {
       cwd: "/r/app-factory/003-x",
       resume: "s1",
       permissionMode: "dontAsk",
-      settingSources: ["project"],
+      settingSources: [],
     });
+  });
+
+  it("loads no filesystem settings, so the worktree's CLAUDE.md, settings and hooks never apply", () => {
+    const agent = parseAgentFile(BUILDER);
+    const options = sdkQueryOptions({ agent, prompt: "Go.", cwd: "/r/app-factory/003-x" });
+    expect(options.settingSources).toEqual([]);
+    expect(options.cwd).toBe("/r/app-factory/003-x");
+    for (const key of ["settings", "additionalDirectories", "hooks"]) expect(key in options, key).toBe(false);
   });
 
   it("leaves out tools, allowedTools, model and resume when not given", () => {
@@ -35,7 +43,7 @@ describe("sdkQueryOptions", () => {
       systemPrompt: "Body\n",
       cwd: "/w",
       permissionMode: "dontAsk",
-      settingSources: ["project"],
+      settingSources: [],
     });
     for (const key of ["tools", "allowedTools", "model", "resume"]) expect(key in options, key).toBe(false);
   });
