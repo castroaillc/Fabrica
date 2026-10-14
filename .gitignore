@@ -1,0 +1,7 @@
+node_modules/
+dist/
+coverage/
+*.tsbuildinfo
+.env
+/factory/jobs/
+.claude/settings.local.json
