@@ -18,12 +18,18 @@ export interface FabricaConfig {
   roles: Record<string, RoleConfig>;
 }
 
-// Provider-selection variables cleared before providerEnv is applied, so a host-wide setting can't leak into a role.
+// Provider-selection and routing variables cleared before providerEnv is applied, so a host-wide setting can't leak
+// into a role.
 export const PROVIDER_ENV_KEYS: readonly string[] = [
   "CLAUDE_CODE_USE_BEDROCK",
   "CLAUDE_CODE_USE_VERTEX",
   "CLAUDE_CODE_USE_FOUNDRY",
   "ANTHROPIC_BASE_URL",
+  "ANTHROPIC_BEDROCK_BASE_URL",
+  "ANTHROPIC_VERTEX_BASE_URL",
+  "CLAUDE_CODE_SKIP_BEDROCK_AUTH",
+  "CLAUDE_CODE_SKIP_VERTEX_AUTH",
+  "CLAUDE_CODE_SKIP_FOUNDRY_AUTH",
 ];
 
 // The fields each provider type takes besides type, all required non-empty strings.
@@ -84,11 +90,15 @@ function parseProvider(value: unknown, path: string): ProviderConfig {
   const required = PROVIDER_FIELDS[type as ProviderConfig["type"]];
   allowKeys(fields, ["type", ...required], path);
   for (const key of required) requireString(fields[key], `${path}.${key}`);
+  // The gateway receives the runner's Anthropic credentials, so it must be reached over TLS and the URL carries none.
   if (type === "anthropic-compatible") {
     const baseUrl = fields.base_url as string;
     const url = URL.canParse(baseUrl) ? new URL(baseUrl) : undefined;
-    if (url?.protocol !== "http:" && url?.protocol !== "https:") {
-      throw new Error(`${path}.base_url must be an http: or https: URL, got ${JSON.stringify(baseUrl)}`);
+    if (url?.protocol !== "https:") {
+      throw new Error(`${path}.base_url must be an https: URL, got ${JSON.stringify(baseUrl)}`);
+    }
+    if (url.username !== "" || url.password !== "") {
+      throw new Error(`${path}.base_url must not contain user:pass@ credentials`);
     }
   }
   return fields as ProviderConfig;

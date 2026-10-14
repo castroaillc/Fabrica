@@ -6,7 +6,7 @@ import type { FabricaConfig } from "./index.js";
 const ROADMAP = `providers:
   claude-bedrock: { type: bedrock, region: us-east-1 }       # CLAUDE_CODE_USE_BEDROCK
   claude-vertex:  { type: vertex, project: acme, region: us-east5 }
-  gateway:        { type: anthropic-compatible, base_url: http://litellm:4000 }  # ANTHROPIC_BASE_URL
+  gateway:        { type: anthropic-compatible, base_url: https://litellm:4000 }  # ANTHROPIC_BASE_URL
 roles:
   spec-writer:       { provider: claude-bedrock, model: claude-opus-5-5 }
   builder:           { provider: claude-bedrock, model: claude-opus-5-5 }
@@ -20,7 +20,7 @@ describe("parseFabricaConfig", () => {
       providers: {
         "claude-bedrock": { type: "bedrock", region: "us-east-1" },
         "claude-vertex": { type: "vertex", project: "acme", region: "us-east5" },
-        gateway: { type: "anthropic-compatible", base_url: "http://litellm:4000" },
+        gateway: { type: "anthropic-compatible", base_url: "https://litellm:4000" },
       },
       roles: {
         "spec-writer": { provider: "claude-bedrock", model: "claude-opus-5-5" },
@@ -61,6 +61,21 @@ describe("parseFabricaConfig", () => {
     [
       "anthropic-compatible with a non-http base_url",
       "providers:\n  p: { type: anthropic-compatible, base_url: 'ftp://host' }\n",
+      "providers.p.base_url",
+    ],
+    [
+      "anthropic-compatible with an http: base_url",
+      "providers:\n  p: { type: anthropic-compatible, base_url: 'http://litellm:4000' }\n",
+      "providers.p.base_url",
+    ],
+    [
+      "anthropic-compatible with user:pass@ in base_url",
+      "providers:\n  p: { type: anthropic-compatible, base_url: 'https://user:pass@litellm:4000' }\n",
+      "providers.p.base_url",
+    ],
+    [
+      "anthropic-compatible with a user@ in base_url",
+      "providers:\n  p: { type: anthropic-compatible, base_url: 'https://token@litellm:4000' }\n",
       "providers.p.base_url",
     ],
     ["an unknown top-level key", "providers: {}\nmodels: {}\n", "models"],
@@ -105,8 +120,8 @@ describe("providerEnv", () => {
       ANTHROPIC_VERTEX_PROJECT_ID: "acme",
       CLOUD_ML_REGION: "us-east5",
     });
-    expect(providerEnv({ type: "anthropic-compatible", base_url: "http://litellm:4000" })).toEqual({
-      ANTHROPIC_BASE_URL: "http://litellm:4000",
+    expect(providerEnv({ type: "anthropic-compatible", base_url: "https://litellm:4000" })).toEqual({
+      ANTHROPIC_BASE_URL: "https://litellm:4000",
     });
   });
 
@@ -116,6 +131,11 @@ describe("providerEnv", () => {
       "CLAUDE_CODE_USE_VERTEX",
       "CLAUDE_CODE_USE_FOUNDRY",
       "ANTHROPIC_BASE_URL",
+      "ANTHROPIC_BEDROCK_BASE_URL",
+      "ANTHROPIC_VERTEX_BASE_URL",
+      "CLAUDE_CODE_SKIP_BEDROCK_AUTH",
+      "CLAUDE_CODE_SKIP_VERTEX_AUTH",
+      "CLAUDE_CODE_SKIP_FOUNDRY_AUTH",
     ]);
   });
 });

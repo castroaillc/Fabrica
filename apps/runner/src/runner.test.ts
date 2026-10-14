@@ -434,7 +434,7 @@ describe("reworkJob", () => {
 describe("fabrica.yaml", () => {
   const CONFIG = `providers:
   claude-bedrock: { type: bedrock, region: us-east-1 }
-  gateway: { type: anthropic-compatible, base_url: http://litellm:4000 }
+  gateway: { type: anthropic-compatible, base_url: https://litellm:4000 }
 roles:
   builder: { provider: claude-bedrock, model: claude-opus-5-5 }
   reviewer-ux: { provider: gateway }
@@ -466,7 +466,7 @@ roles:
     const ux = calls.filter((c) => c.agent.name === "reviewer-ux");
     expect(ux).toHaveLength(2);
     for (const call of ux) {
-      expect(call.provider).toEqual({ type: "anthropic-compatible", base_url: "http://litellm:4000" });
+      expect(call.provider).toEqual({ type: "anthropic-compatible", base_url: "https://litellm:4000" });
       expect("model" in call).toBe(false);
     }
     const others = calls.filter((c) => c.agent.name !== "builder" && c.agent.name !== "reviewer-ux");
