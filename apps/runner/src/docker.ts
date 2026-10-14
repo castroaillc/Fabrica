@@ -1,8 +1,11 @@
 // Docker mode: every agent call runs in one container per job, launched from the fabrica/job image (images/job/).
-// The container sees the job's worktree, job folder and git common dir at their host paths, and nothing else of the
-// host: no host env, no ~/.claude, no database credentials. Model credentials reach it only as exec env vars.
+// The container sees the job's worktree, job folder and git common dir at their host paths, with the git config,
+// hooks and worktree links read-only, and nothing else of the host: no host env, no ~/.claude, no database
+// credentials. Model credentials reach it only as exec env vars.
 import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
+import { existsSync } from "node:fs";
+import { join } from "node:path";
 import type { ProviderConfig } from "@fabrica/core";
 import { providerEnv } from "@fabrica/core";
 import type { AgentExecutor } from "./executor.js";
@@ -19,6 +22,7 @@ export const IMAGE_DIR = "/opt/fabrica";
 export interface Mount {
   source: string;
   target: string;
+  readOnly?: boolean;
 }
 
 export interface ContainerSpec {
@@ -71,7 +75,9 @@ function mountField(field: string): string {
 export function createArgs(spec: ContainerSpec): string[] {
   const mounts = spec.mounts.flatMap((mount) => [
     "--mount",
-    ["type=bind", `source=${mount.source}`, `target=${mount.target}`].map(mountField).join(","),
+    ["type=bind", `source=${mount.source}`, `target=${mount.target}`, ...(mount.readOnly ? ["readonly"] : [])]
+      .map(mountField)
+      .join(","),
   ]);
   return ["create", "--name", spec.name, "--user", spec.user, ...mounts, spec.image, "sleep", "infinity"];
 }
@@ -189,10 +195,16 @@ export function dockerExecutor(config: DockerConfig): DockerMode {
   const executor: AgentExecutor = async (call) => {
     const name = call.agent.name;
     const credentials = providerExecEnv(call.provider, hostEnv);
-    const common = await git(["rev-parse", "--path-format=absolute", "--git-common-dir"], call.cwd);
-    if (!common.ok) throw new Error(`${name}: cannot find the git common dir of ${call.cwd}: ${common.error}`);
+    const dirs = await git(["rev-parse", "--path-format=absolute", "--git-dir", "--git-common-dir"], call.cwd);
+    const [gitDir, common] = dirs.stdout.trim().split("\n");
+    if (!dirs.ok || gitDir === undefined || common === undefined) {
+      throw new Error(`${name}: cannot find the git dirs of ${call.cwd}: ${dirs.error}`);
+    }
     const container = containerName(call.jobFolder, call.jobId);
-    const mounts = [call.cwd, call.jobFolder, common.stdout.trim()].map((path) => ({ source: path, target: path }));
+    const mounts = [
+      ...[call.cwd, call.jobFolder, common].map((path) => ({ source: path, target: path })),
+      ...readOnlyGitPaths(call.cwd, gitDir, common).map((path) => ({ source: path, target: path, readOnly: true })),
+    ];
     await launcher.ensure({ name: container, image, mounts, user: hostUser() });
     const options = sdkQueryOptions(call, {});
     delete options.env;
@@ -210,6 +222,20 @@ export function dockerExecutor(config: DockerConfig): DockerMode {
   };
   const teardown = (repo: string, id: string) => launcher.remove(containerName(jobFolder(repo, id), id));
   return { executor, teardown };
+}
+
+// Read-only overlays inside the mounts: the host runs git in the repo after agents finish, so an agent must not be
+// able to plant config (fsmonitor, filters, hooksPath), hooks or attributes, or repoint the worktree's git dirs.
+function readOnlyGitPaths(worktree: string, gitDir: string, common: string): string[] {
+  const paths = [
+    join(common, "config"),
+    join(common, "hooks"),
+    join(common, "info"),
+    join(worktree, ".git"),
+    join(gitDir, "commondir"),
+    join(gitDir, "gitdir"),
+  ];
+  return paths.filter((path) => existsSync(path));
 }
 
 function hostUser(): string {

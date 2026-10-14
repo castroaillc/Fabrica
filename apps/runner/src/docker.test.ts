@@ -133,10 +133,20 @@ describe("dockerExecutor", () => {
     const { executor } = dockerExecutor({ launcher: fake.launcher, env: HOST_ENV });
     await executor(callFor(repo, worktree(ID)));
     const [spec] = fake.ensured;
+    const same = (path: string) => ({ source: path, target: path });
+    const readOnly = (path: string) => ({ source: path, target: path, readOnly: true });
+    const common = join(repo, ".git");
     expect(spec?.mounts).toEqual([
-      { source: worktree(ID), target: worktree(ID) },
-      { source: join(repo, "factory", "jobs", ID), target: join(repo, "factory", "jobs", ID) },
-      { source: join(repo, ".git"), target: join(repo, ".git") },
+      same(worktree(ID)),
+      same(join(repo, "factory", "jobs", ID)),
+      same(common),
+      // Read-only overlays inside those mounts, so an agent can't plant git config or hooks the host later runs.
+      readOnly(join(common, "config")),
+      readOnly(join(common, "hooks")),
+      readOnly(join(common, "info")),
+      readOnly(join(worktree(ID), ".git")),
+      readOnly(join(common, "worktrees", ID, "commondir")),
+      readOnly(join(common, "worktrees", ID, "gitdir")),
     ]);
     expect(spec?.image).toBe("fabrica/job");
     expect(spec?.user).toBe(`${process.getuid?.()}:${process.getgid?.()}`);
@@ -242,7 +252,9 @@ describe("dockerExecutor", () => {
     expect(create.some((arg) => arg.startsWith("--env") || arg === "-e")).toBe(false);
     expect(create.join(" ")).not.toContain("docker.sock");
     expect(create.slice(create.indexOf("--user"), create.indexOf("--user") + 2)).toEqual(["--user", spec.user]);
-    expect(create.filter((arg) => arg === "--mount")).toHaveLength(3);
+    const mounts = create.flatMap((arg, i) => (create[i - 1] === "--mount" ? [arg] : []));
+    expect(mounts).toHaveLength(spec.mounts.length);
+    expect(mounts.filter((mount) => !mount.endsWith(',"readonly"'))).toHaveLength(3);
     expect(create.filter((arg) => arg === "-v" || arg === "--volume")).toEqual([]);
     expect(create.slice(-3)).toEqual(["fabrica/job", "sleep", "infinity"]);
     const names = exec.flatMap((arg, i) => (exec[i - 1] === "-e" ? [arg] : []));
@@ -260,6 +272,12 @@ describe("dockerExecutor", () => {
   it("quotes mount fields so a comma in a path stays in its field", () => {
     const args = createArgs({ name: "c", image: "i", user: "1:2", mounts: [{ source: "/a,b", target: "/a,b" }] });
     expect(args[args.indexOf("--mount") + 1]).toBe('"type=bind","source=/a,b","target=/a,b"');
+  });
+
+  it("marks read-only mounts readonly", () => {
+    const mounts = [{ source: "/a", target: "/a", readOnly: true }];
+    const args = createArgs({ name: "c", image: "i", user: "1:2", mounts });
+    expect(args[args.indexOf("--mount") + 1]).toBe('"type=bind","source=/a","target=/a","readonly"');
   });
 
   it("sends the prompt and the SDK options without env on stdin, including resume", async () => {

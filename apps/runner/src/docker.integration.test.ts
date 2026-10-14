@@ -1,7 +1,7 @@
 // Runs against a real Docker daemon only when the fabrica/job image is built; skipped otherwise, never failed.
 // Execs shell commands in a job container (no model) and removes the container afterwards.
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -86,6 +86,22 @@ describe.skipIf(!imageBuilt())("a job container from fabrica/job", () => {
       expect(sh(repo, "log", "-1", "--format=%s %an", `factory/${ID}`).trim()).toBe("Built Test");
 
       await shell(`test ! -e ${repo}/README.md`);
+
+      // The git config, hooks and worktree links the host's git reads later are read-only in the container.
+      const git = join(repo, ".git");
+      const gitDir = join(git, "worktrees", ID);
+      for (const target of [
+        join(git, "config"),
+        join(git, "hooks", "post-merge"),
+        join(git, "info", "attributes"),
+        join(worktree, ".git"),
+        join(gitDir, "commondir"),
+        join(gitDir, "gitdir"),
+      ]) {
+        const write = await exec(["sh", "-c", `echo planted >> ${target}`]);
+        expect(write.ok, `${target} is writable`).toBe(false);
+      }
+      expect(readFileSync(join(git, "config"), "utf8")).not.toContain("planted");
       await shell(`test ! -e ${homedir()}/.claude && test ! -e "$HOME/.claude"`);
 
       const printed = await exec(["node", "-e", "console.log(JSON.stringify(process.env))"]);

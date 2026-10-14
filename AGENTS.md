@@ -162,6 +162,22 @@ socket):
 - the job folder `<repo>/factory/jobs/<id>/`,
 - the repo's git common dir (`<repo>/.git`), which git in a worktree needs.
 
+Inside those, the files that host git reads and runs commands from are mounted
+read-only, when they exist:
+
+- the common dir's `config`, `hooks/` and `info/`;
+- the worktree's `.git` file;
+- `<repo>/.git/worktrees/<id>/commondir` and `gitdir`.
+
+The runner also runs its own host git in Docker mode (status, merge, worktree
+add and remove, branch) with `-c core.fsmonitor=false -c core.hooksPath=/dev/null`.
+That keeps an agent from planting fsmonitor commands, filters or hooks that the
+host would run with the runner's env.
+
+This is not a full boundary. The agent can still write the repo's objects and
+refs, including branches other than its own, and its branch is merged into
+`main` once approved.
+
 Env: no host variable reaches the container except these, and their values
 never appear on the docker command line:
 
