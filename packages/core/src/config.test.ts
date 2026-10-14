@@ -6,7 +6,7 @@ import type { FabricaConfig } from "./index.js";
 const ROADMAP = `providers:
   claude-bedrock: { type: bedrock, region: us-east-1 }       # CLAUDE_CODE_USE_BEDROCK
   claude-vertex:  { type: vertex, project: acme, region: us-east5 }
-  gateway:        { type: anthropic-compatible, base_url: https://litellm:4000 }  # ANTHROPIC_BASE_URL
+  gateway:        { type: anthropic-compatible, base_url: http://localhost:4000 }  # ANTHROPIC_BASE_URL
 roles:
   spec-writer:       { provider: claude-bedrock, model: claude-opus-5-5 }
   builder:           { provider: claude-bedrock, model: claude-opus-5-5 }
@@ -20,7 +20,7 @@ describe("parseFabricaConfig", () => {
       providers: {
         "claude-bedrock": { type: "bedrock", region: "us-east-1" },
         "claude-vertex": { type: "vertex", project: "acme", region: "us-east5" },
-        gateway: { type: "anthropic-compatible", base_url: "https://litellm:4000" },
+        gateway: { type: "anthropic-compatible", base_url: "http://localhost:4000" },
       },
       roles: {
         "spec-writer": { provider: "claude-bedrock", model: "claude-opus-5-5" },
@@ -64,7 +64,7 @@ describe("parseFabricaConfig", () => {
       "providers.p.base_url",
     ],
     [
-      "anthropic-compatible with an http: base_url",
+      "anthropic-compatible with an http: base_url on a non-loopback host",
       "providers:\n  p: { type: anthropic-compatible, base_url: 'http://litellm:4000' }\n",
       "providers.p.base_url",
     ],
@@ -98,6 +98,23 @@ describe("parseFabricaConfig", () => {
   ])("throws naming the path for %s", (_, content, path) => {
     expect(() => parseFabricaConfig(content)).toThrow(path);
   });
+
+  it.each(["http://localhost:4000", "http://127.0.0.1:4000", "http://[::1]:4000", "https://litellm:4000"])(
+    "accepts the gateway base_url %s",
+    (baseUrl) => {
+      const config = parseFabricaConfig(`providers:\n  p: { type: anthropic-compatible, base_url: '${baseUrl}' }\n`);
+      expect(config.providers.p).toEqual({ type: "anthropic-compatible", base_url: baseUrl });
+    },
+  );
+
+  it.each(["http://user:s3cret@litellm:4000", "ftp://user:s3cret@host", "http://user:s3cret@localhost:4000"])(
+    "rejects user:pass@ in %s without echoing the credentials",
+    (baseUrl) => {
+      const content = `providers:\n  p: { type: anthropic-compatible, base_url: '${baseUrl}' }\n`;
+      expect(() => parseFabricaConfig(content)).toThrow("providers.p.base_url must not contain user:pass@");
+      expect(() => parseFabricaConfig(content)).not.toThrow("s3cret");
+    },
+  );
 
   it("throws when the top level is not a mapping", () => {
     expect(() => parseFabricaConfig("- providers\n")).toThrow("top level");

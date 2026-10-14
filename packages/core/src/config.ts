@@ -40,6 +40,9 @@ const PROVIDER_FIELDS: Record<ProviderConfig["type"], readonly string[]> = {
   "anthropic-compatible": ["base_url"],
 };
 
+// Hosts a gateway base_url may reach over plain http:. URL.hostname keeps the brackets around IPv6 addresses.
+const LOOPBACK_HOSTS: readonly string[] = ["localhost", "127.0.0.1", "[::1]"];
+
 type Mapping = Record<string, unknown>;
 
 export function parseFabricaConfig(content: string): FabricaConfig {
@@ -90,15 +93,20 @@ function parseProvider(value: unknown, path: string): ProviderConfig {
   const required = PROVIDER_FIELDS[type as ProviderConfig["type"]];
   allowKeys(fields, ["type", ...required], path);
   for (const key of required) requireString(fields[key], `${path}.${key}`);
-  // The gateway receives the runner's Anthropic credentials, so it must be reached over TLS and the URL carries none.
+  // The gateway receives the runner's Anthropic credentials, so it must be reached over TLS (or stay on this host)
+  // and the URL carries none. Userinfo is checked first so no error message echoes credentials.
   if (type === "anthropic-compatible") {
     const baseUrl = fields.base_url as string;
-    const url = URL.canParse(baseUrl) ? new URL(baseUrl) : undefined;
-    if (url?.protocol !== "https:") {
-      throw new Error(`${path}.base_url must be an https: URL, got ${JSON.stringify(baseUrl)}`);
-    }
+    if (!URL.canParse(baseUrl)) throw new Error(`${path}.base_url must be a URL`);
+    const url = new URL(baseUrl);
     if (url.username !== "" || url.password !== "") {
       throw new Error(`${path}.base_url must not contain user:pass@ credentials`);
+    }
+    const loopback = url.protocol === "http:" && LOOPBACK_HOSTS.includes(url.hostname);
+    if (url.protocol !== "https:" && !loopback) {
+      throw new Error(
+        `${path}.base_url must be an https: URL, or http: on localhost, 127.0.0.1 or [::1], got ${JSON.stringify(baseUrl)}`,
+      );
     }
   }
   return fields as ProviderConfig;

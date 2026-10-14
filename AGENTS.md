@@ -88,7 +88,7 @@ providers:
   api:            { type: anthropic }
   claude-bedrock: { type: bedrock, region: us-east-1 }
   claude-vertex:  { type: vertex, project: acme, region: us-east5 }
-  gateway:        { type: anthropic-compatible, base_url: https://litellm:4000 }
+  gateway:        { type: anthropic-compatible, base_url: http://localhost:4000 }
 roles:
   builder:     { provider: claude-bedrock, model: claude-opus-5-5 }
   reviewer-ux: { provider: gateway, model: qwen3-coder }
@@ -97,8 +97,8 @@ roles:
 Credentials (`ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, the AWS credential
 chain, GCP ADC) come from the runner's environment, never from the file.
 An `anthropic-compatible` gateway receives the runner's `ANTHROPIC_API_KEY` /
-`ANTHROPIC_AUTH_TOKEN`, so its `base_url` must be `https:` and may not contain
-`user:pass@`.
+`ANTHROPIC_AUTH_TOKEN`, so its `base_url` must be `https:` (plain `http:` only
+for `localhost`, `127.0.0.1` or `[::1]`) and may not contain `user:pass@`.
 
 ## Conventions
 

@@ -54,7 +54,7 @@ fabrica/
 providers:
   claude-bedrock: { type: bedrock, region: us-east-1 }       # CLAUDE_CODE_USE_BEDROCK
   claude-vertex:  { type: vertex, project: acme, region: us-east5 }
-  gateway:        { type: anthropic-compatible, base_url: https://litellm:4000 }  # ANTHROPIC_BASE_URL
+  gateway:        { type: anthropic-compatible, base_url: http://localhost:4000 }  # ANTHROPIC_BASE_URL
 roles:
   spec-writer:       { provider: claude-bedrock, model: claude-opus-5-5 }
   builder:           { provider: claude-bedrock, model: claude-opus-5-5 }
