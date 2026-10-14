@@ -15,3 +15,25 @@ export interface AgentCall {
 }
 
 export type AgentExecutor = (call: AgentCall) => Promise<{ sessionId: string }>;
+
+// The port the runner runs fabrica.yaml's setup command through, once in each new worktree. hostSetup is the default;
+// Docker mode runs it in the job's container.
+export interface SetupRequest {
+  command: readonly string[];
+  cwd: string;
+  jobId: string;
+  jobFolder: string;
+}
+
+export interface SetupResult {
+  ok: boolean;
+  // stdout and stderr, each trimmed, joined by a newline when both are non-empty; the error when it could not start.
+  output: string;
+}
+
+export type SetupRunner = (request: SetupRequest) => Promise<SetupResult>;
+
+// Joins a finished process's output the way SetupResult.output says.
+export function setupOutput(stdout: string, stderr: string): string {
+  return [stdout.trim(), stderr.trim()].filter((text) => text !== "").join("\n");
+}

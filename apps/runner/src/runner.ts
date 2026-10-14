@@ -23,7 +23,8 @@ import type {
   ProviderConfig,
   Transition,
 } from "@fabrica/core";
-import type { AgentCall, AgentExecutor } from "./executor.js";
+import type { AgentCall, AgentExecutor, SetupRequest, SetupResult, SetupRunner } from "./executor.js";
+import { setupOutput } from "./executor.js";
 import { git, run } from "./git.js";
 import { createJobDir, isValidJobId, jobFolder, writeJobFile } from "./jobFolder.js";
 import type { JobStore, SavedJob } from "./jobStore.js";
@@ -33,7 +34,9 @@ export interface RunnerOptions {
   repo: string;
   executor: AgentExecutor;
   notify: (message: string) => void;
-  setup?: string[];
+  // Runs fabrica.yaml's setup command in a new worktree, for example in the job's container in Docker mode.
+  // Defaults to hostSetup: on the host, in the worktree, with the runner's env.
+  runSetup?: SetupRunner;
   // When set, drive saves the state and in-flight actions after every step, and builder session ids as they arrive.
   store?: JobStore;
   // Called after a successful removeWorktree, for example to remove the job's container in Docker mode.
@@ -50,6 +53,8 @@ interface Context {
   agents: Record<string, AgentDefinition>;
   // Provider and model by agent name, from fabrica.yaml. Agents it doesn't list are absent.
   roles: Map<string, { provider: ProviderConfig; model?: string }>;
+  // The setup command from fabrica.yaml, run once in each new worktree. Absent when it lists none.
+  setup?: readonly string[];
   // Builder session ids by spawnAgent name, for resumeBuilder. In memory for one entry-point call.
   sessions: Map<string, string>;
   // Resolves once drive has saved the job's row, so saveSession never runs before the row exists.
@@ -144,10 +149,10 @@ async function context(options: RunnerOptions, id: string): Promise<Context> {
   if (!isValidJobId(id)) throw new Error(`Invalid job id: ${JSON.stringify(id)}`);
   const repo = resolve(options.repo);
   const agents = await loadAgents(repo);
-  const roles = await loadRoles(repo, agents);
+  const config = await loadConfig(repo, agents);
   let markSaved = (): void => undefined;
   const saved = new Promise<void>((done) => (markSaved = done));
-  return { repo, id, options, agents, roles, sessions: new Map(), saved, markSaved, resumed: false };
+  return { repo, id, options, agents, ...config, sessions: new Map(), saved, markSaved, resumed: false };
 }
 
 function requireStore(options: RunnerOptions): JobStore {
@@ -190,15 +195,15 @@ async function loadAgents(repo: string): Promise<Record<string, AgentDefinition>
   return parseAgentDirectory(files);
 }
 
-// fabrica.yaml comes from the main checkout too, so a job branch cannot change its own providers or models.
-async function loadRoles(
+// fabrica.yaml comes from the main checkout too, so a job branch cannot change its own providers, models or setup.
+async function loadConfig(
   repo: string,
   agents: Record<string, AgentDefinition>,
-): Promise<Map<string, { provider: ProviderConfig; model?: string }>> {
+): Promise<Pick<Context, "roles" | "setup">> {
   const roles = new Map<string, { provider: ProviderConfig; model?: string }>();
   const file = join(repo, "fabrica.yaml");
   const content = await readIfExists(file);
-  if (content === null) return roles;
+  if (content === null) return { roles };
   let config;
   try {
     config = parseFabricaConfig(content);
@@ -214,7 +219,7 @@ async function loadRoles(
     if (role.model !== undefined) resolved.model = role.model;
     roles.set(name, resolved);
   }
-  return roles;
+  return config.setup === undefined ? { roles } : { roles, setup: config.setup };
 }
 
 async function loadState(ctx: Context): Promise<OrchestratorState> {
@@ -462,14 +467,28 @@ async function createWorktree(ctx: Context, branch: string, worktree: string): P
       ["worktree", "add", "-b", branch, "--end-of-options", worktree, "main"],
       ctx.repo,
     );
-    if (!add.ok) return { type: "worktreeCreated", ok: false, error: add.error };
+    if (!add.ok) return { type: "worktreeCreated", ok: false, step: "add", error: add.error };
   }
-  const [command, ...args] = ctx.options.setup ?? [];
-  if (command !== undefined) {
-    const setup = await run(command, args, worktree);
-    if (!setup.ok) return { type: "worktreeCreated", ok: false, error: setup.error };
+  if (ctx.setup !== undefined) {
+    const runSetup = ctx.options.runSetup ?? hostSetup;
+    const request: SetupRequest = { command: ctx.setup, cwd: worktree, jobId: ctx.id, jobFolder: jobFolder(ctx.repo, ctx.id) };
+    let setup: SetupResult;
+    try {
+      setup = await runSetup(request);
+    } catch (error) {
+      setup = { ok: false, output: errorMessage(error) };
+    }
+    if (!setup.ok) return { type: "worktreeCreated", ok: false, step: "setup", error: setup.output };
   }
   return { type: "worktreeCreated", ok: true };
+}
+
+// Runs the setup command on the host: execFile in the worktree with the runner's env, no shell.
+async function hostSetup(request: SetupRequest): Promise<SetupResult> {
+  const [command, ...args] = request.command;
+  if (command === undefined) throw new Error("the setup command is empty");
+  const result = await run(command, args, request.cwd);
+  return { ok: result.ok, output: setupOutput(result.stdout, result.stderr) || (result.ok ? "" : result.error) };
 }
 
 // After a restart, a worktree registered at worktree on branch means git worktree add already ran.

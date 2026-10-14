@@ -12,7 +12,7 @@ import {
   reworkPrompt,
 } from "@fabrica/core";
 import type { JobState, Reviewer, Verdict } from "@fabrica/core";
-import type { AgentCall, AgentExecutor } from "./executor.js";
+import type { AgentCall, AgentExecutor, SetupRequest, SetupRunner } from "./executor.js";
 import { isValidJobId } from "./jobFolder.js";
 import type { JobStore, SavedJob } from "./jobStore.js";
 import type { JobMessage, JobQueue } from "./queue.js";
@@ -65,6 +65,13 @@ function makeRepo(): string {
   sh(repo, "add", ".");
   sh(repo, "commit", "-q", "-m", "Initial");
   return repo;
+}
+
+// Commits a fabrica.yaml with only a setup command, as a JSON flow sequence (valid YAML), on main.
+function commitSetup(repo: string, setup: string[]): void {
+  writeFileSync(join(repo, "fabrica.yaml"), `setup: ${JSON.stringify(setup)}\n`);
+  sh(repo, "add", "fabrica.yaml");
+  sh(repo, "commit", "-q", "-m", "Add setup");
 }
 
 function folder(repo: string): string {
@@ -313,32 +320,89 @@ describe("runJob", () => {
     expect(sh(repo, "rev-parse", "main").trim()).toBe(head);
   });
 
-  it("stops on worktree setup failure without calling an agent", async () => {
+  it("hands a failed setup command to a human with its stdout and stderr, without calling an agent", async () => {
     const repo = makeRepo();
+    commitSetup(repo, ["node", "-e", "console.log('setup-out'); console.error('setup-err'); process.exit(3)"]);
     const { executor, calls } = fake(repo);
-    const { options: opts, notes } = options(repo, executor, { setup: ["node", "-e", "process.exit(1)"] });
+    const { options: opts, notes } = options(repo, executor);
     const job = await runJob(opts, { id: ID, feature: "Do X" });
-    expect(job.stage).toBe("spec");
-    expect(readJob(repo).stage).toBe("spec");
+    expect(job.stage).toBe("needs-human");
+    expect(readJob(repo).stage).toBe("needs-human");
     expect(calls).toHaveLength(0);
-    expect(notes.some((n) => n.includes("worktree setup failed"))).toBe(true);
+    const note = notes.find((n) => n.includes("the worktree setup command failed"));
+    expect(note).toContain("setup-out\nsetup-err");
+    expect(note).toContain(worktreeOf(repo));
   });
 
-  it("runs the setup command in the worktree", async () => {
+  it("hands a setup command that cannot start to a human with the error", async () => {
     const repo = makeRepo();
+    commitSetup(repo, ["fabrica-no-such-command"]);
+    const { executor, calls } = fake(repo);
+    const { options: opts, notes } = options(repo, executor);
+    const job = await runJob(opts, { id: ID, feature: "Do X" });
+    expect(job.stage).toBe("needs-human");
+    expect(calls).toHaveLength(0);
+    expect(notes.find((n) => n.includes("the worktree setup command failed"))).toContain("ENOENT");
+  });
+
+  it("runs the setup command from fabrica.yaml in the worktree before the first agent call", async () => {
+    const repo = makeRepo();
+    commitSetup(repo, ["node", "-e", "require('node:fs').writeFileSync('setup-ran', '')"]);
     let ranInWorktree = false;
-    const { executor } = fake(repo, {
+    const { executor, calls } = fake(repo, {
       hold: async (call) => {
-        ranInWorktree ||= existsSync(join(call.cwd, "setup-ran"));
+        if (calls.length === 1) ranInWorktree = existsSync(join(call.cwd, "setup-ran"));
       },
     });
-    const setup = ["node", "-e", "require('node:fs').writeFileSync('setup-ran', '')"];
-    const { options: opts, notes } = options(repo, executor, { setup });
+    const { options: opts, notes } = options(repo, executor);
     const job = await runJob(opts, { id: ID, feature: "Do X" });
     expect(ranInWorktree).toBe(true);
     // The untracked setup output makes git worktree remove fail; the job still counts as merged.
     expect(job.stage).toBe("merged");
     expect(notes.some((n) => n.includes("git worktree remove failed"))).toBe(true);
+  });
+
+  it("calls a given runSetup once with the argv, worktree, job id and folder instead of the host default", async () => {
+    const repo = makeRepo();
+    const setup = ["node", "-e", "require('node:fs').writeFileSync('setup-ran', '')"];
+    commitSetup(repo, setup);
+    const requests: SetupRequest[] = [];
+    const runSetup: SetupRunner = async (request) => {
+      requests.push(request);
+      return { ok: true, output: "" };
+    };
+    const { executor, calls } = fake(repo);
+    const job = await runJob(options(repo, executor, { runSetup }).options, { id: ID, feature: "Do X" });
+    expect(requests).toEqual([{ command: setup, cwd: worktreeOf(repo), jobId: ID, jobFolder: folder(repo) }]);
+    expect(calls[0]!.agent.name).toBe("spec-writer");
+    expect(job.stage).toBe("merged");
+    expect(existsSync(join(worktreeOf(repo), "setup-ran"))).toBe(false);
+  });
+
+  it("hands the job to a human when runSetup throws", async () => {
+    const repo = makeRepo();
+    commitSetup(repo, ["true"]);
+    const runSetup: SetupRunner = async () => {
+      throw new Error("container would not start");
+    };
+    const { executor, calls } = fake(repo);
+    const { options: opts, notes } = options(repo, executor, { runSetup });
+    const job = await runJob(opts, { id: ID, feature: "Do X" });
+    expect(job.stage).toBe("needs-human");
+    expect(calls).toHaveLength(0);
+    expect(notes.find((n) => n.includes("the worktree setup command failed"))).toContain("container would not start");
+  });
+
+  it("calls no runSetup when fabrica.yaml has no setup", async () => {
+    const repo = makeRepo();
+    let setups = 0;
+    const runSetup: SetupRunner = async () => {
+      setups += 1;
+      return { ok: true, output: "" };
+    };
+    const job = await runJob(options(repo, fake(repo).executor, { runSetup }).options, { id: ID, feature: "Do X" });
+    expect(job.stage).toBe("merged");
+    expect(setups).toBe(0);
   });
 
   it("stops mid-round when a reviewer writes no file, and waits for the others", async () => {
@@ -623,6 +687,17 @@ roles:
     expect(existsSync(folder(repo))).toBe(false);
   });
 
+  it("rejects an invalid setup with the file's path before running any action", async () => {
+    const repo = makeRepo();
+    commitConfig(repo, "setup: pnpm install\n");
+    const { executor, calls } = fake(repo);
+    const run = runJob(options(repo, executor).options, { id: ID, feature: "Do X" });
+    await expect(run).rejects.toThrow(join(repo, "fabrica.yaml"));
+    await expect(run).rejects.toThrow("setup");
+    expect(calls).toHaveLength(0);
+    expect(existsSync(folder(repo))).toBe(false);
+  });
+
   it("ships a fabrica.example.yaml at the repo root that parses", () => {
     const content = readFileSync(new URL("../../../fabrica.example.yaml", import.meta.url), "utf8");
     const config = parseFabricaConfig(content);
@@ -783,6 +858,7 @@ describe("resumeJob", () => {
 
   it("accepts a worktree that git worktree add already created, and still runs the setup command", async () => {
     const repo = makeRepo();
+    commitSetup(repo, ["node", "-e", "require('node:fs').writeFileSync('setup-ran', '')"]);
     const { store } = memoryStore();
     await enqueueJob(options(repo, fake(repo).executor, { store }).options, fakeQueue(), { id: ID, feature: "Do X" });
     sh(repo, "worktree", "add", "-q", "-b", `factory/${ID}`, worktreeOf(repo), "main");
@@ -792,10 +868,9 @@ describe("resumeJob", () => {
         ranInWorktree ||= existsSync(join(call.cwd, "setup-ran"));
       },
     });
-    const setup = ["node", "-e", "require('node:fs').writeFileSync('setup-ran', '')"];
-    const { options: opts, notes } = options(repo, executor, { store, setup });
+    const { options: opts, notes } = options(repo, executor, { store });
     const job = await resumeJob(opts, ID);
-    expect(notes.some((n) => n.includes("worktree setup failed"))).toBe(false);
+    expect(notes.some((n) => n.includes("the worktree setup command failed"))).toBe(false);
     expect(ranInWorktree).toBe(true);
     expect(job.stage).toBe("merged");
   });
