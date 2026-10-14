@@ -1,6 +1,6 @@
 import { readdirSync, readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
-import { parseAgentDirectory, parseAgentFile } from "./index.js";
+import { KNOWN_TOOLS, parseAgentDirectory, parseAgentFile } from "./index.js";
 import type { AgentDefinition } from "./index.js";
 
 const agentsDir = new URL("../../../.claude/agents/", import.meta.url);
@@ -66,6 +66,20 @@ describe("parseAgentFile", () => {
     expect(() => parseAgentFile("---\nname: demo\ndescription: d\njunk\n---\nBody")).toThrow(/no ":": junk/);
   });
 
+  it("rejects unknown tool names, case-sensitively", () => {
+    expect(() => parseAgentFile("---\nname: x\ndescription: d\ntools: Read, Fetch\n---\nBody")).toThrow(
+      /unknown tool "Fetch"/,
+    );
+    expect(() => parseAgentFile("---\nname: x\ndescription: d\ntools: read\n---\nBody")).toThrow(
+      /unknown tool "read"/,
+    );
+  });
+
+  it("accepts every known tool", () => {
+    const agent = parseAgentFile(`---\nname: x\ndescription: d\ntools: ${KNOWN_TOOLS.join(", ")}\n---\nBody`);
+    expect(agent.tools).toEqual(KNOWN_TOOLS);
+  });
+
   it("parses the real builder agent", () => {
     const agent = parseAgentFile(readFileSync(new URL("builder.md", agentsDir), "utf8"));
     expect(agent.name).toBe("builder");
@@ -120,6 +134,36 @@ describe("parseAgentDirectory", () => {
         { fileName: "b.md", content },
       ]),
     ).toThrow(/b\.md.*"dup".*a\.md/);
+  });
+
+  it("keys Object.prototype names as plain entries", () => {
+    const names = ["constructor", "__proto__", "toString", "hasOwnProperty"];
+    const agents = parseAgentDirectory(
+      names.map((name) => ({ fileName: `${name}.md`, content: `---\nname: ${name}\ndescription: d\n---\nBody` })),
+    );
+    expect(Object.keys(agents).sort()).toEqual([...names].sort());
+    expect(agents["__proto__"]?.name).toBe("__proto__");
+    expect(agents["constructor"]?.name).toBe("constructor");
+    expect(agents["toString"]?.name).toBe("toString");
+    expect(agents["hasOwnProperty"]?.name).toBe("hasOwnProperty");
+  });
+
+  it("rejects duplicate Object.prototype names", () => {
+    const content = "---\nname: constructor\ndescription: d\n---\nBody";
+    expect(() =>
+      parseAgentDirectory([
+        { fileName: "a.md", content },
+        { fileName: "b.md", content },
+      ]),
+    ).toThrow(/b\.md.*"constructor".*a\.md/);
+  });
+
+  it("includes the file name when a tool is unknown", () => {
+    expect(() =>
+      parseAgentDirectory([
+        { fileName: "evil.md", content: "---\nname: x\ndescription: d\ntools: Read, Fetch\n---\nBody" },
+      ]),
+    ).toThrow(/^evil\.md: .*unknown tool "Fetch"/);
   });
 
   it("includes the file name when a file fails to parse", () => {

@@ -9,6 +9,26 @@ export interface AgentDefinition {
   prompt: string;
 }
 
+// Claude Code tool names an agent file may grant in `tools`. Anything else is rejected.
+export const KNOWN_TOOLS: readonly string[] = [
+  "Agent",
+  "AskUserQuestion",
+  "Bash",
+  "Edit",
+  "ExitPlanMode",
+  "Glob",
+  "Grep",
+  "Monitor",
+  "NotebookEdit",
+  "Read",
+  "Skill",
+  "Task",
+  "TodoWrite",
+  "WebFetch",
+  "WebSearch",
+  "Write",
+];
+
 export function parseAgentFile(content: string): AgentDefinition {
   const lines = content.split("\n");
   const isDelimiter = (line: string) => line.replace(/\r$/, "") === "---";
@@ -47,6 +67,8 @@ export function parseAgentFile(content: string): AgentDefinition {
       .split(",")
       .map((tool) => tool.trim())
       .filter((tool) => tool !== "");
+    const unknown = agent.tools.find((tool) => !KNOWN_TOOLS.includes(tool));
+    if (unknown !== undefined) throw new Error(`Agent frontmatter has unknown tool "${unknown}"`);
   }
   if (model !== undefined) agent.model = model;
   return agent;
@@ -55,8 +77,9 @@ export function parseAgentFile(content: string): AgentDefinition {
 export function parseAgentDirectory(
   files: ReadonlyArray<{ fileName: string; content: string }>,
 ): Record<string, AgentDefinition> {
-  const agents: Record<string, AgentDefinition> = {};
-  const sources: Record<string, string> = {};
+  // Null-prototype objects, so names like "constructor" or "__proto__" are plain keys.
+  const agents: Record<string, AgentDefinition> = Object.create(null);
+  const sources: Record<string, string> = Object.create(null);
   for (const { fileName, content } of files) {
     if (!fileName.endsWith(".md")) continue;
     let agent: AgentDefinition;
