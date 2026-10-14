@@ -173,6 +173,18 @@ host user's uid:gid, without `--privileged`. Only the orchestrator's agent
 calls and the worktree setup command move into it: worktree creation, merges
 and job.json stay on the host.
 
+The image includes Debian's Chromium and the `agent-browser` CLI, both pinned
+in `images/job/Dockerfile` (Chromium `155.0.8059.39-1~deb12u1` from a
+snapshot.debian.org source, `agent-browser@0.39.1`), with
+`AGENT_BROWSER_EXECUTABLE_PATH` pointing at that Chromium so nothing is
+downloaded at run time. The builder's and reviewers' dev servers and their
+browser both run inside the job's container, so `localhost:<port>` is the
+container, not the host, and no port is published. Chromium runs with its own
+sandbox off (`--no-sandbox`, set in the image through `AGENT_BROWSER_ARGS`),
+because the host uid has no capabilities to set it up: the container is the
+boundary. `agent-browser` keeps its sessions and sockets under
+`$HOME/.agent-browser`, one set per `--session` name.
+
 The `fabrica.yaml` `setup` command runs in the job's container right after the
 host creates the worktree, as `docker exec` of the argv in the worktree, so
 native dependencies are built for the container's Linux. It gets an empty
@@ -229,8 +241,9 @@ worktree is removed; one left by a failed job can be removed with
 
 The Docker integration test in `apps/runner/src/docker.integration.test.ts`
 is skipped unless `docker image inspect fabrica/job` succeeds. To run it,
-build the image as above, then `pnpm test -- docker`. It removes its
-container afterwards.
+build the image as above, then `pnpm test -- docker`. It also opens a page
+served inside the container with `agent-browser`. It removes its containers
+afterwards.
 
 ## Model providers
 
