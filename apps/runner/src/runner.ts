@@ -38,6 +38,8 @@ export interface RunnerOptions {
   store?: JobStore;
   // Called after a successful removeWorktree, for example to remove the job's container in Docker mode.
   teardown?: (id: string) => Promise<void>;
+  // Docker mode: agents can write the repo's git dir, so host git runs with fsmonitor and hooks turned off.
+  hardenGit?: boolean;
 }
 
 interface Context {
@@ -323,25 +325,30 @@ async function execute(
         track(running, action, Promise.resolve(await checkMainCheckout(ctx)));
         break;
       case "merge": {
-        const merge = await git(["merge", "--no-ff", "-m", action.message, "--end-of-options", action.branch], repo);
+        const mergeHead = ["rev-parse", "-q", "--verify", "--end-of-options", "MERGE_HEAD"];
+        const merge = await hostGit(
+          options,
+          ["merge", "--no-ff", "-m", action.message, "--end-of-options", action.branch],
+          repo,
+        );
         const event: OrchestratorEvent = merge.ok
           ? { type: "mergeDone", ok: true }
           : {
               type: "mergeDone",
               ok: false,
               error: merge.error,
-              inProgress: (await git(["rev-parse", "-q", "--verify", "--end-of-options", "MERGE_HEAD"], repo)).ok,
+              inProgress: (await hostGit(options, mergeHead, repo)).ok,
             };
         track(running, action, Promise.resolve(event));
         break;
       }
       case "abortMerge": {
-        const abort = await git(["merge", "--abort"], repo);
+        const abort = await hostGit(options, ["merge", "--abort"], repo);
         if (!abort.ok) options.notify(`${id}: git merge --abort failed: ${abort.error}`);
         break;
       }
       case "removeWorktree": {
-        const remove = await git(["worktree", "remove", "--end-of-options", action.worktree], repo);
+        const remove = await hostGit(options, ["worktree", "remove", "--end-of-options", action.worktree], repo);
         const output = remove.ok ? `${remove.stdout}${remove.stderr}`.trim() : remove.error;
         if (remove.ok && options.teardown !== undefined) {
           try {
@@ -354,7 +361,7 @@ async function execute(
         break;
       }
       case "deleteBranch": {
-        const remove = await git(["branch", "-d", "--end-of-options", action.branch], repo);
+        const remove = await hostGit(options, ["branch", "-d", "--end-of-options", action.branch], repo);
         if (!remove.ok) options.notify(`${id}: git branch -d ${action.branch} failed: ${remove.error}`);
         break;
       }
@@ -423,8 +430,12 @@ async function callAgent(
 }
 
 async function createWorktree(ctx: Context, branch: string, worktree: string): Promise<OrchestratorEvent> {
-  if (!(ctx.resumed && (await hasWorktree(ctx.repo, branch, worktree)))) {
-    const add = await git(["worktree", "add", "-b", branch, "--end-of-options", worktree, "main"], ctx.repo);
+  if (!(ctx.resumed && (await hasWorktree(ctx, branch, worktree)))) {
+    const add = await hostGit(
+      ctx.options,
+      ["worktree", "add", "-b", branch, "--end-of-options", worktree, "main"],
+      ctx.repo,
+    );
     if (!add.ok) return { type: "worktreeCreated", ok: false, error: add.error };
   }
   const [command, ...args] = ctx.options.setup ?? [];
@@ -436,8 +447,8 @@ async function createWorktree(ctx: Context, branch: string, worktree: string): P
 }
 
 // After a restart, a worktree registered at worktree on branch means git worktree add already ran.
-async function hasWorktree(repo: string, branch: string, worktree: string): Promise<boolean> {
-  const list = await git(["worktree", "list", "--porcelain"], repo);
+async function hasWorktree(ctx: Context, branch: string, worktree: string): Promise<boolean> {
+  const list = await hostGit(ctx.options, ["worktree", "list", "--porcelain"], ctx.repo);
   if (!list.ok) return false;
   return list.stdout.split("\n\n").some((block) => {
     const lines = block.split("\n");
@@ -446,11 +457,18 @@ async function hasWorktree(repo: string, branch: string, worktree: string): Prom
 }
 
 async function checkMainCheckout(ctx: Context): Promise<OrchestratorEvent> {
-  const status = await git(["status", "--porcelain", "--", ".", ":!factory/backlog.md"], ctx.repo);
+  const status = await hostGit(ctx.options, ["status", "--porcelain", "--", ".", ":!factory/backlog.md"], ctx.repo);
   if (!status.ok) throw new Error(`${ctx.id}: git status failed in ${ctx.repo}: ${status.error}`);
-  const branch = await git(["branch", "--show-current"], ctx.repo);
+  const branch = await hostGit(ctx.options, ["branch", "--show-current"], ctx.repo);
   if (!branch.ok) throw new Error(`${ctx.id}: git branch --show-current failed in ${ctx.repo}: ${branch.error}`);
   return { type: "mainCheckout", porcelain: status.stdout, branch: branch.stdout.trim() };
+}
+
+const HARDENED_GIT: readonly string[] = ["-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null"];
+
+// Git passes -c settings on to the git processes it starts, so they cover worktree remove's status check too.
+function hostGit(options: RunnerOptions, args: readonly string[], cwd: string) {
+  return git(options.hardenGit ? [...HARDENED_GIT, ...args] : args, cwd);
 }
 
 async function readIfExists(file: string): Promise<string | null> {

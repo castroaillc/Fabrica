@@ -4,10 +4,10 @@ import type { CliDeps } from "./main.js";
 import { main } from "./main.js";
 
 // FABRICA_RUNNER_MODE picks where agents run: on the host (the default) or in one Docker container per job.
-function runnerMode(mode: string | undefined): Pick<CliDeps, "executor" | "teardown"> | null {
+function runnerMode(mode: string | undefined): Pick<CliDeps, "executor" | "teardown" | "hardenGit"> | null {
   if (mode === undefined || mode === "" || mode === "host") return { executor: sdkExecutor };
   if (mode !== "docker") return null;
-  return dockerExecutor({ launcher: dockerLauncher(process.env), env: process.env });
+  return { ...dockerExecutor({ launcher: dockerLauncher(process.env), env: process.env }), hardenGit: true };
 }
 
 // The first SIGINT or SIGTERM stops fabrica worker gracefully; a second one exits as usual.

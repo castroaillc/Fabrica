@@ -410,6 +410,32 @@ describe("runJob", () => {
     expect(notes).toContain(`${ID}: teardown failed: docker rm failed`);
   });
 
+  it("turns off git hooks and fsmonitor for host git with hardenGit, and leaves them on without it", async () => {
+    for (const hardenGit of [true, false]) {
+      const repo = makeRepo();
+      const marks = join(dirname(repo), "marks");
+      // What a container agent could plant in the mounted git dir once it has committed: a hook and an fsmonitor.
+      const script = (name: string) => {
+        const file = join(repo, ".git", "hooks", name);
+        writeFileSync(file, `#!/bin/sh\necho ${name} >> ${marks}\n`, { mode: 0o755 });
+        return file;
+      };
+      const { executor } = fake(repo, {
+        build: () => {
+          script("post-merge");
+          sh(repo, "config", "core.fsmonitor", script("fsmonitor"));
+          return "STATUS: READY\n\n# Build\n";
+        },
+      });
+      const extra = hardenGit ? { hardenGit } : {};
+      const job = await runJob(options(repo, executor, extra).options, { id: ID, feature: "Do X" });
+      expect(job.stage).toBe("merged");
+      const ran = existsSync(marks) ? readFileSync(marks, "utf8") : "";
+      if (hardenGit) expect(ran).toBe("");
+      else for (const name of ["post-merge", "fsmonitor"]) expect(ran).toContain(name);
+    }
+  });
+
   it("runs no teardown in host mode, where there is no hook", async () => {
     const repo = makeRepo();
     const { executor } = fake(repo);
