@@ -5,3 +5,19 @@ export { parseVerdict, parseDecision, parseBuildStatus } from "./contracts.js";
 export type { Verdict, Decision, BuildStatus } from "./contracts.js";
 export { parseAgentFile, parseAgentDirectory } from "./agents.js";
 export type { AgentDefinition } from "./agents.js";
+export {
+  jobPorts,
+  nextJobNumber,
+  nextReworkNumber,
+  builderName,
+  pathsSentence,
+  specWriterPrompt,
+  buildPrompt,
+  reviewerPrompt,
+  approverPrompt,
+  resumeMessage,
+  reworkPrompt,
+} from "./prompts.js";
+export type { AgentName, JobPorts } from "./prompts.js";
+export { MAX_RESUMES, startJob, stateFromJob, transition } from "./orchestrator.js";
+export type { Awaiting, OrchestratorState, Action, OrchestratorEvent, Transition } from "./orchestrator.js";
