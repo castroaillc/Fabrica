@@ -480,6 +480,103 @@ describe("commands", () => {
   });
 });
 
+describe("push", () => {
+  function startPush(): Step {
+    return startJob({ id: "002-x", feature: "Do X", repo: REPO, push: "origin" });
+  }
+
+  function approvingPush(): Step {
+    let t = step(startPush(), { type: "worktreeCreated", ok: true });
+    t = step(t, done("spec-writer", "# Spec"));
+    t = step(t, done("builder", "STATUS: READY\n\n# Build"));
+    return runRound(t, ALL_PASS);
+  }
+
+  const PUSH: Action = { type: "pushBranch", remote: "origin", branch: "factory/002-x" };
+
+  it("sets push on the job only when one is given", () => {
+    expect(startPush().state.job.push).toBe("origin");
+    expect(Object.keys(startPush().state.job).at(-1)).toBe("push");
+    expect("push" in start().state.job).toBe(false);
+  });
+
+  it("pushes an approved job instead of merging it, ending at pushed", () => {
+    let t = step(approvingPush(), done("approver", "APPROVE\n\nShip it."));
+    expect(t.state.awaiting).toBe("push");
+    expect(types(t.actions)).toEqual(["notify", "pushBranch"]);
+    expect(types(t.actions)).not.toContain("checkMainCheckout");
+    expect(types(t.actions)).not.toContain("merge");
+    expect(t.actions[1]).toEqual(PUSH);
+    expect(notes(t.actions)).toEqual(["002-x: approved → pushing factory/002-x to origin"]);
+
+    t = step(t, { type: "pushDone", ok: true });
+    expect(t.state.job.stage).toBe("pushed");
+    expect(t.state.awaiting).toBe("nothing");
+    expect(types(t.actions)).toEqual(["writeJob", "notify"]);
+    expect(notes(t.actions)).toEqual(["002-x: pushed factory/002-x to origin"]);
+    for (const event of [{ type: "approve" }, { type: "rework", note: "n", k: 1 }] as OrchestratorEvent[]) {
+      expect(types(transition(t.state, event).actions)).toEqual(["notify"]);
+    }
+  });
+
+  it("hands an approved job whose push fails to a human, without a second push", () => {
+    let t = step(approvingPush(), done("approver", "APPROVE"));
+    t = step(t, { type: "pushDone", ok: false, error: "rejected (non-fast-forward)" });
+    expect(t.state.job.stage).toBe("needs-human");
+    expect(t.state.awaiting).toBe("nothing");
+    expect(types(t.actions)).toEqual(["writeJob", "notify"]);
+    expect(notes(t.actions)).toEqual(["002-x: needs a human, push failed: rejected (non-fast-forward)"]);
+  });
+
+  it("pushes the branch after an ESCALATE hands the job to a human, and stays in needs-human", () => {
+    const t = step(approvingPush(), done("approver", "ESCALATE\n\nreason"));
+    expect(t.state.job.stage).toBe("needs-human");
+    expect(t.state.awaiting).toBe("handoff-push");
+    expect(types(t.actions)).toEqual(["writeJob", "notify", "pushBranch"]);
+    expect(t.actions[2]).toEqual(PUSH);
+    expect(notes(t.actions)[0]).toContain("needs a human, the approver escalated");
+
+    const ok = step(t, { type: "pushDone", ok: true });
+    expect(ok.state.job.stage).toBe("needs-human");
+    expect(ok.state.awaiting).toBe("nothing");
+    expect(ok.actions).toEqual([{ type: "notify", message: "002-x: pushed factory/002-x to origin" }]);
+
+    const failed = step(t, { type: "pushDone", ok: false, error: "no network" });
+    expect(failed.state.job.stage).toBe("needs-human");
+    expect(failed.state.awaiting).toBe("nothing");
+    expect(failed.actions).toEqual([{ type: "notify", message: "002-x: push failed: no network" }]);
+    expect(types(step(failed, { type: "approve" }).actions)).toEqual(["notify", "pushBranch"]);
+  });
+
+  it("pushes after a BLOCKED build and after exhausted rounds too, but not after a stop", () => {
+    let t = step(startPush(), { type: "worktreeCreated", ok: true });
+    t = step(t, done("spec-writer", "# Spec"));
+    expect(types(step(t, done("builder", "STATUS: BLOCKED")).actions)).toEqual(["writeJob", "notify", "pushBranch"]);
+    expect(types(step(t, done("builder", null)).actions)).toEqual(["notify"]);
+
+    let r = step(t, done("builder", "STATUS: READY"));
+    const changes: Record<Reviewer, Verdict> = { ...ALL_PASS, ux: "CHANGES" };
+    for (let round = 1; round < 3; round++) r = step(runRound(r, changes), done("builder", "STATUS: READY"));
+    r = runRound(r, changes);
+    expect(r.state.awaiting).toBe("handoff-push");
+    expect(types(r.actions).slice(-4)).toEqual(["writeFile", "writeJob", "notify", "pushBranch"]);
+  });
+
+  it("approve on a needs-human job with push emits pushBranch", () => {
+    const state = needsHumanJob(2);
+    let t = step({ state: { ...state, job: { ...state.job, push: "origin" } }, actions: [] }, { type: "approve" });
+    expect(t.state.awaiting).toBe("push");
+    expect(t.actions.at(-1)).toEqual(PUSH);
+    t = step(t, { type: "pushDone", ok: true });
+    expect(t.state.job.stage).toBe("pushed");
+  });
+
+  it("throws for a pushDone the machine does not await", () => {
+    expect(() => transition(merging().state, { type: "pushDone", ok: true })).toThrow(/awaiting main-checkout/);
+    expect(() => transition(needsHumanJob(1), { type: "pushDone", ok: true })).toThrow(/awaiting nothing/);
+  });
+});
+
 describe("unexpected events", () => {
   it("throws for events that do not match what the machine awaits", () => {
     expect(() => transition(reviewing().state, done("approver", "APPROVE"))).toThrow(/awaiting reviewers/);

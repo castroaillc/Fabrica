@@ -1,7 +1,7 @@
 // Job state as stored in factory/jobs/<job-id>/job.json (see SKILL.md "job.json").
 import type { Verdict } from "./contracts.js";
 
-export const STAGES = ["spec", "build", "review", "approve", "merged", "needs-human"] as const;
+export const STAGES = ["spec", "build", "review", "approve", "merged", "pushed", "needs-human"] as const;
 export type Stage = (typeof STAGES)[number];
 
 export const REVIEWERS = ["security", "ux", "ui", "code"] as const;
@@ -18,4 +18,6 @@ export interface JobState {
   stage: Stage;
   round: number;
   reviews: Reviews;
+  // The git remote name to push the branch to instead of merging, for jobs run with --push.
+  push?: string;
 }
