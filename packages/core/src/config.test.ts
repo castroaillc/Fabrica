@@ -48,6 +48,30 @@ describe("parseFabricaConfig", () => {
     });
   });
 
+  it("parses setup as an argv list, kept verbatim", () => {
+    const config = parseFabricaConfig("setup: [pnpm, install, --frozen-lockfile, 'a b']\n");
+    expect(config).toEqual<FabricaConfig>({
+      providers: {},
+      roles: {},
+      setup: ["pnpm", "install", "--frozen-lockfile", "a b"],
+    });
+  });
+
+  it("leaves setup out when it is absent or null", () => {
+    expect(parseFabricaConfig("providers: {}\n")).not.toHaveProperty("setup");
+    expect(parseFabricaConfig("setup:\n")).not.toHaveProperty("setup");
+  });
+
+  it.each([
+    ["a plain-string setup", "setup: pnpm install\n"],
+    ["an empty setup list", "setup: []\n"],
+    ["a setup with a non-string entry", "setup: [pnpm, 1]\n"],
+    ["a setup with an empty-string entry", "setup: [pnpm, '']\n"],
+    ["a setup mapping", "setup: { command: pnpm }\n"],
+  ])("rejects %s naming setup", (_, content) => {
+    expect(() => parseFabricaConfig(content)).toThrow(/^setup/);
+  });
+
   it.each([
     ["a role naming an undeclared provider", "roles:\n  builder: { provider: nope }\n", "roles.builder.provider"],
     ["an unknown provider type", "providers:\n  p: { type: openai }\n", "providers.p.type"],

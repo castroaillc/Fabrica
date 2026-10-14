@@ -1,4 +1,5 @@
-// Parses fabrica.yaml: model providers and the provider and model each agent role uses. See docs/ROADMAP.md.
+// Parses fabrica.yaml: model providers, the provider and model each agent role uses, and the worktree setup command.
+// See docs/ROADMAP.md.
 // Takes file contents only; reading them from disk is the caller's job. Credentials never live in this file.
 import { parse } from "yaml";
 
@@ -16,6 +17,8 @@ export interface RoleConfig {
 export interface FabricaConfig {
   providers: Record<string, ProviderConfig>;
   roles: Record<string, RoleConfig>;
+  // The command run once in each new worktree: argv, command then arguments, never passed to a shell.
+  setup?: string[];
 }
 
 // Provider-selection and routing variables cleared before providerEnv is applied, so a host-wide setting can't leak
@@ -55,7 +58,7 @@ export function parseFabricaConfig(content: string): FabricaConfig {
   }
   if (document === null || document === undefined) return { providers: {}, roles: {} };
   const top = mapping(document, "top level");
-  allowKeys(top, ["providers", "roles"], "");
+  allowKeys(top, ["providers", "roles", "setup"], "");
 
   const providers = Object.fromEntries(
     entries(top.providers, "providers").map(([name, value]) => [name, parseProvider(value, `providers.${name}`)]),
@@ -63,7 +66,9 @@ export function parseFabricaConfig(content: string): FabricaConfig {
   const roles = Object.fromEntries(
     entries(top.roles, "roles").map(([name, value]) => [name, parseRole(value, `roles.${name}`, providers)]),
   );
-  return { providers, roles };
+  const config: FabricaConfig = { providers, roles };
+  if (top.setup !== undefined && top.setup !== null) config.setup = parseSetup(top.setup, "setup");
+  return config;
 }
 
 export function providerEnv(provider: ProviderConfig): Record<string, string> {
@@ -122,6 +127,13 @@ function parseRole(value: unknown, path: string, providers: Record<string, Provi
   const role: RoleConfig = { provider };
   if (fields.model !== undefined) role.model = requireString(fields.model, `${path}.model`);
   return role;
+}
+
+function parseSetup(value: unknown, path: string): string[] {
+  if (!Array.isArray(value) || value.length === 0) {
+    throw new Error(`${path} must be a non-empty list of strings: the command, then its arguments`);
+  }
+  return value.map((item, index) => requireString(item, `${path}[${index}]`));
 }
 
 // A missing or empty section yields no entries.
