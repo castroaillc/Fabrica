@@ -42,7 +42,9 @@ export async function runJob(options: RunnerOptions, input: { id: string; featur
   try {
     await mkdir(folder);
   } catch (error) {
-    if (errorCode(error) === "EEXIST") throw new Error(`${ctx.id}: job folder already exists: ${folder}`);
+    if (errorCode(error) === "EEXIST") {
+      throw Object.assign(new Error(`${ctx.id}: job folder already exists: ${folder}`), { code: "EEXIST" });
+    }
     throw error;
   }
   return drive(ctx, startJob({ id: ctx.id, feature: input.feature, repo: ctx.repo }));

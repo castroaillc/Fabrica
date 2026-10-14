@@ -1,0 +1,17 @@
+{
+  "name": "@fabrica/cli",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "bin": {
+    "fabrica": "./bin/fabrica.js"
+  },
+  "dependencies": {
+    "@fabrica/core": "workspace:*",
+    "@fabrica/runner": "workspace:*",
+    "tsx": "^4.23.15"
+  }
+}
