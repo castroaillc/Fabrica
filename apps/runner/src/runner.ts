@@ -461,12 +461,12 @@ async function hasWorktree(repo: string, branch: string, worktree: string): Prom
 
 // Pushes only factory/<job-id> to a configured remote, with both sides of the refspec spelled out and never forced.
 async function pushBranch(ctx: Context, remote: string, branch: string): Promise<OrchestratorEvent> {
-  if (branch !== `factory/${ctx.id}`) {
-    return { type: "pushDone", ok: false, error: `refusing to push ${branch}: only factory/${ctx.id} may be pushed` };
+  const { repo, id } = ctx;
+  if (branch !== `factory/${id}`) {
+    return { type: "pushDone", ok: false, error: `refusing to push ${branch}: only factory/${id} may be pushed` };
   }
-  if (!(await remotes(ctx.repo)).includes(remote)) return { type: "pushDone", ok: false, error: `no remote named ${remote}` };
-  const ref = `refs/heads/${branch}`;
-  const push = await git(["push", "--end-of-options", remote, `${ref}:${ref}`], ctx.repo);
+  if (!(await remotes(repo)).includes(remote)) return { type: "pushDone", ok: false, error: `no remote named ${remote}` };
+  const push = await git(["push", "--end-of-options", remote, `refs/heads/${branch}:refs/heads/${branch}`], repo);
   return push.ok ? { type: "pushDone", ok: true } : { type: "pushDone", ok: false, error: push.error };
 }
 
