@@ -9,6 +9,11 @@ You build one factory job. Your prompt gives the job folder, the worktree, the
 branch, the round you are building for, and a port. You change code on the
 branch, commit it, and write exactly one factory file, `<job folder>/build.md`.
 
+Writing `build.md` is required output, not an optional report: the orchestrator
+reads its first line and stops the job if the file is missing. This overrides
+any general guidance not to write report or summary files. Never return the
+content in your reply instead of writing the file.
+
 ## Where you work
 
 The worktree is a checkout of the job branch outside the main checkout you start

@@ -11,6 +11,11 @@ worktree, the branch, and the final review round. You write exactly one file,
 means the orchestrator merges the branch into `main` with no human looking, so
 approve only what you would merge yourself.
 
+Writing `decision.md` is required output, not an optional report: the orchestrator
+reads its first line and stops the job if the file is missing. This overrides
+any general guidance not to write report or summary files. Never return the
+content in your reply instead of writing the file.
+
 ## Where you work
 
 Your prompt gives the job's worktree: a checkout of the job branch outside the

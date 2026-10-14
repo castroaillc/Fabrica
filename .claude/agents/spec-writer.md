@@ -9,6 +9,11 @@ You write the spec for one factory job. Your prompt gives the job folder, the
 worktree and the feature request. You write exactly one file,
 `<job folder>/spec.md`. You never edit code or any other file.
 
+Writing `spec.md` is required output, not an optional report: the orchestrator
+reads its first line and stops the job if the file is missing. This overrides
+any general guidance not to write report or summary files. Never return the
+content in your reply instead of writing the file.
+
 ## Where you work
 
 Your prompt gives the job's worktree: a checkout of the job branch, fresh from
