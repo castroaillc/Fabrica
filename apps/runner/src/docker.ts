@@ -10,7 +10,8 @@ import { mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import type { ProviderConfig } from "@fabrica/core";
 import { providerEnv } from "@fabrica/core";
-import type { AgentExecutor } from "./executor.js";
+import type { AgentExecutor, SetupRunner } from "./executor.js";
+import { setupOutput } from "./executor.js";
 import { git } from "./git.js";
 import { jobFolder } from "./jobFolder.js";
 import { sdkQueryOptions } from "./sdkOptions.js";
@@ -187,6 +188,8 @@ export interface DockerConfig {
 
 export interface DockerMode {
   executor: AgentExecutor;
+  // Runs fabrica.yaml's setup command in the job's container, with no env: no host variable, credentials or git identity.
+  setup: SetupRunner;
   // Removes the job's container. Called once the job's worktree is removed.
   teardown: (repo: string, id: string) => Promise<void>;
 }
@@ -194,17 +197,22 @@ export interface DockerMode {
 export function dockerExecutor(config: DockerConfig): DockerMode {
   const { launcher, env: hostEnv } = config;
   const image = config.image ?? JOB_IMAGE;
+  // Creates or starts the job's container for a call in worktree, and returns its name. Agent calls and setup share it.
+  const ensure = async (label: string, worktree: string, folder: string, id: string): Promise<string> => {
+    const dirs = await git(["rev-parse", "--path-format=absolute", "--git-dir", "--git-common-dir"], worktree);
+    const [gitDir, common] = dirs.stdout.trim().split("\n");
+    if (!dirs.ok || gitDir === undefined || common === undefined) {
+      throw new Error(`${label}: cannot find the git dirs of ${worktree}: ${dirs.error}`);
+    }
+    const container = containerName(folder, id);
+    const mounts = await gitMounts(worktree, folder, gitDir, common);
+    await launcher.ensure({ name: container, image, mounts, user: hostUser() });
+    return container;
+  };
   const executor: AgentExecutor = async (call) => {
     const name = call.agent.name;
     const credentials = providerExecEnv(call.provider, hostEnv);
-    const dirs = await git(["rev-parse", "--path-format=absolute", "--git-dir", "--git-common-dir"], call.cwd);
-    const [gitDir, common] = dirs.stdout.trim().split("\n");
-    if (!dirs.ok || gitDir === undefined || common === undefined) {
-      throw new Error(`${name}: cannot find the git dirs of ${call.cwd}: ${dirs.error}`);
-    }
-    const container = containerName(call.jobFolder, call.jobId);
-    const mounts = await gitMounts(call.cwd, call.jobFolder, gitDir, common);
-    await launcher.ensure({ name: container, image, mounts, user: hostUser() });
+    const container = await ensure(name, call.cwd, call.jobFolder, call.jobId);
     const options = sdkQueryOptions(call, {});
     delete options.env;
     const result = await launcher.exec({
@@ -219,8 +227,13 @@ export function dockerExecutor(config: DockerConfig): DockerMode {
     if (reported?.sessionId !== undefined && result.ok) return { sessionId: reported.sessionId };
     throw new Error(`${name} returned no result from container ${container}: ${result.stderr.trim() || "no output"}`);
   };
+  const setup: SetupRunner = async (request) => {
+    const container = await ensure("setup", request.cwd, request.jobFolder, request.jobId);
+    const result = await launcher.exec({ container, command: request.command, cwd: request.cwd, env: {}, stdin: "" });
+    return { ok: result.ok, output: setupOutput(result.stdout, result.stderr) };
+  };
   const teardown = (repo: string, id: string) => launcher.remove(containerName(jobFolder(repo, id), id));
-  return { executor, teardown };
+  return { executor, setup, teardown };
 }
 
 // The host runs git in the repo after agents finish, so an agent must not be able to plant config (fsmonitor,

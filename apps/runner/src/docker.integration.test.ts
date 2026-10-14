@@ -139,4 +139,50 @@ describe.skipIf(!imageBuilt())("a job container from fabrica/job", () => {
     });
     expect(left.trim()).toBe("");
   });
+
+  it("runs a setup command in the job's container that writes into the worktree on the host", { timeout: 120_000 }, async () => {
+    const root = realpathSync(mkdtempSync(join(tmpdir(), "fabrica-docker-it-")));
+    temps.push(root);
+    const repo = join(root, "app");
+    mkdirSync(repo);
+    sh(repo, "init", "-q", "-b", "main");
+    sh(repo, "config", "user.name", "Test");
+    sh(repo, "config", "user.email", "test@example.com");
+    writeFileSync(join(repo, "README.md"), "hello\n");
+    sh(repo, "add", ".");
+    sh(repo, "commit", "-q", "-m", "Initial");
+    const worktree = join(root, "app-factory", ID);
+    sh(repo, "worktree", "add", "-q", "-b", `factory/${ID}`, worktree, "main");
+    const folder = join(repo, "factory", "jobs", ID);
+    mkdirSync(folder, { recursive: true });
+
+    const real = dockerLauncher(process.env);
+    let name: string | undefined;
+    const launcher: ContainerLauncher = {
+      ensure: async (given) => {
+        name = given.name;
+        await real.ensure(given);
+      },
+      exec: (request) => real.exec(request),
+      remove: (container) => real.remove(container),
+    };
+    const { setup, teardown } = dockerExecutor({ launcher, env: process.env });
+    const request = (command: string[]) => ({ command, cwd: worktree, jobId: ID, jobFolder: folder });
+    try {
+      const ran = await setup(request(["sh", "-c", "echo ran > setup-ran.txt"]));
+      expect(ran.ok, ran.output).toBe(true);
+      expect(readFileSync(join(worktree, "setup-ran.txt"), "utf8")).toBe("ran\n");
+
+      const failed = await setup(request(["sh", "-c", "echo boom >&2; exit 2"]));
+      expect(failed.ok).toBe(false);
+      expect(failed.output).toContain("boom");
+    } finally {
+      await teardown(repo, ID);
+    }
+    expect(name).toBeDefined();
+    const left = execFileSync("docker", ["ps", "-a", "--filter", `name=${name}`, "--format", "{{.Names}}"], {
+      encoding: "utf8",
+    });
+    expect(left.trim()).toBe("");
+  });
 });
