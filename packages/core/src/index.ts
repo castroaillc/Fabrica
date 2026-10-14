@@ -5,6 +5,8 @@ export { parseVerdict, parseDecision, parseBuildStatus } from "./contracts.js";
 export type { Verdict, Decision, BuildStatus } from "./contracts.js";
 export { KNOWN_TOOLS, parseAgentFile, parseAgentDirectory } from "./agents.js";
 export type { AgentDefinition } from "./agents.js";
+export { PROVIDER_ENV_KEYS, parseFabricaConfig, providerEnv } from "./config.js";
+export type { ProviderConfig, RoleConfig, FabricaConfig } from "./config.js";
 export {
   jobPorts,
   nextJobNumber,

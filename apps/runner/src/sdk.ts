@@ -6,7 +6,7 @@ import { sdkQueryOptions } from "./sdkOptions.js";
 export const sdkExecutor: AgentExecutor = async (call) => {
   let sessionId = "";
   let failure: string | undefined;
-  for await (const message of query({ prompt: call.prompt, options: sdkQueryOptions(call) })) {
+  for await (const message of query({ prompt: call.prompt, options: sdkQueryOptions(call, process.env) })) {
     if (message.session_id) sessionId = message.session_id;
     if (message.type === "result") {
       if (message.subtype !== "success") failure = message.errors.join("\n") || message.subtype;

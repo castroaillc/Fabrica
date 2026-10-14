@@ -2,7 +2,15 @@
 // Each entry point runs actions in order and feeds every outcome back through transition until awaiting "nothing".
 import { mkdir, readFile, readdir } from "node:fs/promises";
 import { join, resolve } from "node:path";
-import { STAGES, nextReworkNumber, parseAgentDirectory, startJob, stateFromJob, transition } from "@fabrica/core";
+import {
+  STAGES,
+  nextReworkNumber,
+  parseAgentDirectory,
+  parseFabricaConfig,
+  startJob,
+  stateFromJob,
+  transition,
+} from "@fabrica/core";
 import type {
   Action,
   AgentDefinition,
@@ -10,6 +18,7 @@ import type {
   JobState,
   OrchestratorEvent,
   OrchestratorState,
+  ProviderConfig,
   Transition,
 } from "@fabrica/core";
 import type { AgentCall, AgentExecutor } from "./executor.js";
@@ -28,6 +37,8 @@ interface Context {
   id: string;
   options: RunnerOptions;
   agents: Record<string, AgentDefinition>;
+  // Provider and model by agent name, from fabrica.yaml. Agents it doesn't list are absent.
+  roles: Map<string, { provider: ProviderConfig; model?: string }>;
   // Builder session ids by spawnAgent name, for resumeBuilder. In memory for one entry-point call.
   sessions: Map<string, string>;
 }
@@ -66,7 +77,8 @@ export async function reworkJob(options: RunnerOptions, id: string, note: string
 async function context(options: RunnerOptions, id: string): Promise<Context> {
   if (!isValidJobId(id)) throw new Error(`Invalid job id: ${JSON.stringify(id)}`);
   const repo = resolve(options.repo);
-  return { repo, id, options, agents: await loadAgents(repo), sessions: new Map() };
+  const agents = await loadAgents(repo);
+  return { repo, id, options, agents, roles: await loadRoles(repo, agents), sessions: new Map() };
 }
 
 // Agent definitions come from the main checkout, so a job branch cannot change its own agents.
@@ -77,6 +89,33 @@ async function loadAgents(repo: string): Promise<Record<string, AgentDefinition>
     names.map(async (fileName) => ({ fileName, content: await readFile(join(dir, fileName), "utf8") })),
   );
   return parseAgentDirectory(files);
+}
+
+// fabrica.yaml comes from the main checkout too, so a job branch cannot change its own providers or models.
+async function loadRoles(
+  repo: string,
+  agents: Record<string, AgentDefinition>,
+): Promise<Map<string, { provider: ProviderConfig; model?: string }>> {
+  const roles = new Map<string, { provider: ProviderConfig; model?: string }>();
+  const file = join(repo, "fabrica.yaml");
+  const content = await readIfExists(file);
+  if (content === null) return roles;
+  let config;
+  try {
+    config = parseFabricaConfig(content);
+  } catch (error) {
+    throw new Error(`${file}: ${errorMessage(error)}`);
+  }
+  for (const [name, role] of Object.entries(config.roles)) {
+    if (!Object.hasOwn(agents, name)) {
+      throw new Error(`${file}: role ${name} names no agent definition in ${repo}/.claude/agents/`);
+    }
+    // parseFabricaConfig has checked that every role names a declared provider.
+    const resolved: { provider: ProviderConfig; model?: string } = { provider: config.providers[role.provider]! };
+    if (role.model !== undefined) resolved.model = role.model;
+    roles.set(name, resolved);
+  }
+  return roles;
 }
 
 async function loadState(ctx: Context): Promise<OrchestratorState> {
@@ -133,14 +172,14 @@ async function execute(ctx: Context, state: OrchestratorState, actions: Action[]
         track(running, Promise.resolve(await createWorktree(ctx, action.branch, action.worktree)));
         break;
       case "spawnAgent": {
-        const call = { agent: definition(ctx, action.agent), prompt: action.prompt, cwd: state.job.worktree };
+        const call = agentCall(ctx, action.agent, action.prompt, state.job.worktree);
         track(running, callAgent(ctx, action.agent, call, outputFile(state, action.agent), action.name));
         break;
       }
       case "resumeBuilder": {
         const resume = ctx.sessions.get(action.name);
         if (resume === undefined) throw new Error(`${id}: no session to resume for ${action.name}`);
-        const call = { agent: definition(ctx, "builder"), prompt: action.message, cwd: state.job.worktree, resume };
+        const call = { ...agentCall(ctx, "builder", action.message, state.job.worktree), resume };
         track(running, callAgent(ctx, "builder", call, outputFile(state, "builder")));
         break;
       }
@@ -198,6 +237,11 @@ function definition(ctx: Context, agent: AgentName): AgentDefinition {
   const found = ctx.agents[agent];
   if (!found) throw new Error(`${ctx.id}: no agent definition named ${agent} in ${ctx.repo}/.claude/agents/`);
   return found;
+}
+
+// A call with the agent's definition, plus its provider and model when fabrica.yaml lists its role.
+function agentCall(ctx: Context, agent: AgentName, prompt: string, cwd: string): AgentCall {
+  return { agent: definition(ctx, agent), prompt, cwd, ...ctx.roles.get(agent) };
 }
 
 // The file each agent writes in the job folder. A reviewer's round is the round it was spawned in.

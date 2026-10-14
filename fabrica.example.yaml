@@ -1,0 +1,12 @@
+# Copy to fabrica.yaml in the main checkout to pick a provider and model per agent role.
+# Credentials (ANTHROPIC_API_KEY, ANTHROPIC_AUTH_TOKEN, AWS credentials, GCP ADC) come from the runner's environment.
+providers:
+  claude-bedrock: { type: bedrock, region: us-east-1 }       # CLAUDE_CODE_USE_BEDROCK
+  claude-vertex:  { type: vertex, project: acme, region: us-east5 }
+  gateway:        { type: anthropic-compatible, base_url: http://localhost:4000 }  # ANTHROPIC_BASE_URL
+  anthropic:      { type: anthropic }
+roles:
+  spec-writer:       { provider: claude-bedrock, model: claude-opus-5-5 }
+  builder:           { provider: claude-bedrock, model: claude-opus-5-5 }
+  reviewer-security: { provider: claude-bedrock, model: claude-opus-5-5 }
+  reviewer-ux:       { provider: gateway, model: qwen3-coder }   # e.g. local vLLM
