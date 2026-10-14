@@ -1,8 +1,9 @@
 // Maps an agent call to Claude Agent SDK query options. Pure, so it can be tested without the SDK running.
 import type { Options } from "@anthropic-ai/claude-agent-sdk";
+import { PROVIDER_ENV_KEYS, providerEnv } from "@fabrica/core";
 import type { AgentCall } from "./executor.js";
 
-export function sdkQueryOptions(call: AgentCall): Options {
+export function sdkQueryOptions(call: AgentCall, baseEnv: Record<string, string | undefined>): Options {
   const options: Options = {
     systemPrompt: call.agent.prompt,
     cwd: call.cwd,
@@ -15,7 +16,14 @@ export function sdkQueryOptions(call: AgentCall): Options {
     options.tools = [...call.agent.tools];
     options.allowedTools = [...call.agent.tools];
   }
-  if (call.agent.model !== undefined) options.model = call.agent.model;
+  const model = call.model ?? call.agent.model;
+  if (model !== undefined) options.model = model;
   if (call.resume !== undefined) options.resume = call.resume;
+  // env replaces the subprocess environment, so it starts from baseEnv. Without a provider the SDK inherits process.env.
+  if (call.provider !== undefined) {
+    const env = { ...baseEnv };
+    for (const key of PROVIDER_ENV_KEYS) delete env[key];
+    options.env = { ...env, ...providerEnv(call.provider) };
+  }
   return options;
 }

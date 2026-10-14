@@ -3,7 +3,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync,
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { REVIEWERS, parseAgentFile, resumeMessage, reworkPrompt } from "@fabrica/core";
+import { REVIEWERS, parseAgentFile, parseFabricaConfig, resumeMessage, reworkPrompt } from "@fabrica/core";
 import type { JobState, Reviewer, Verdict } from "@fabrica/core";
 import type { AgentCall, AgentExecutor } from "./executor.js";
 import { isValidJobId } from "./jobFolder.js";
@@ -428,5 +428,110 @@ describe("reworkJob", () => {
     expect(readFileSync(join(folder(repo), "job.json"), "utf8")).toBe(json);
     expect(sh(repo, "rev-parse", "main")).toBe(main);
     expect(existsSync(worktreeOf(repo))).toBe(true);
+  });
+});
+
+describe("fabrica.yaml", () => {
+  const CONFIG = `providers:
+  claude-bedrock: { type: bedrock, region: us-east-1 }
+  gateway: { type: anthropic-compatible, base_url: http://litellm:4000 }
+roles:
+  builder: { provider: claude-bedrock, model: claude-opus-5-5 }
+  reviewer-ux: { provider: gateway }
+`;
+
+  function commitConfig(repo: string, content: string): void {
+    writeFileSync(join(repo, "fabrica.yaml"), content);
+    sh(repo, "add", "fabrica.yaml");
+    sh(repo, "commit", "-q", "-m", "Add fabrica.yaml");
+  }
+
+  it("sets each configured role's provider and model on its calls, including the resumed builder", async () => {
+    const repo = makeRepo();
+    commitConfig(repo, CONFIG);
+    const { executor, calls } = fake(repo, {
+      review: (reviewer, round) => (round === 1 && reviewer === "code" ? "CHANGES" : "PASS"),
+    });
+    const job = await runJob(options(repo, executor).options, { id: ID, feature: "Do X" });
+    expect(job.stage).toBe("merged");
+
+    const builders = calls.filter((c) => c.agent.name === "builder");
+    expect(builders).toHaveLength(2);
+    expect(builders[1]!.resume).toBeDefined();
+    for (const call of builders) {
+      expect(call.provider).toEqual({ type: "bedrock", region: "us-east-1" });
+      expect(call.model).toBe("claude-opus-5-5");
+      expect(call.agent.model).toBe("opus");
+    }
+    const ux = calls.filter((c) => c.agent.name === "reviewer-ux");
+    expect(ux).toHaveLength(2);
+    for (const call of ux) {
+      expect(call.provider).toEqual({ type: "anthropic-compatible", base_url: "http://litellm:4000" });
+      expect("model" in call).toBe(false);
+    }
+    const others = calls.filter((c) => c.agent.name !== "builder" && c.agent.name !== "reviewer-ux");
+    expect(others.map((c) => c.agent.name)).toContain("spec-writer");
+    for (const call of others) {
+      expect("provider" in call, call.agent.name).toBe(false);
+      expect("model" in call, call.agent.name).toBe(false);
+    }
+  });
+
+  it("ignores a fabrica.yaml that is only in the job worktree", async () => {
+    const repo = makeRepo();
+    const first = fake(repo, {
+      build: (call) => {
+        writeFileSync(join(call.cwd, "fabrica.yaml"), CONFIG);
+        sh(call.cwd, "add", "fabrica.yaml");
+        sh(call.cwd, "commit", "-q", "-m", "Add fabrica.yaml");
+        return "STATUS: BLOCKED\n";
+      },
+    });
+    const blocked = await runJob(options(repo, first.executor).options, { id: ID, feature: "Do X" });
+    expect(blocked.stage).toBe("needs-human");
+    expect(existsSync(join(worktreeOf(repo), "fabrica.yaml"))).toBe(true);
+    expect(existsSync(join(repo, "fabrica.yaml"))).toBe(false);
+
+    const second = fake(repo);
+    await reworkJob(options(repo, second.executor).options, ID, "note");
+    expect(second.calls.map((c) => c.agent.name)).toContain("builder");
+    for (const call of [...first.calls, ...second.calls]) {
+      expect("provider" in call, call.agent.name).toBe(false);
+      expect("model" in call, call.agent.name).toBe(false);
+    }
+  });
+
+  it("rejects a role naming no agent before running any action", async () => {
+    const repo = makeRepo();
+    commitConfig(repo, "providers:\n  api: { type: anthropic }\nroles:\n  reviewer-perf: { provider: api }\n");
+    const { executor, calls } = fake(repo);
+    await expect(runJob(options(repo, executor).options, { id: ID, feature: "Do X" })).rejects.toThrow(
+      /reviewer-perf.*\.claude\/agents\//,
+    );
+    expect(calls).toHaveLength(0);
+    expect(existsSync(folder(repo))).toBe(false);
+    expect(existsSync(worktreeOf(repo))).toBe(false);
+  });
+
+  it("rejects an invalid fabrica.yaml with its path before running any action", async () => {
+    const repo = makeRepo();
+    commitConfig(repo, "providers:\n  p: { type: bedrock }\n");
+    const { executor, calls } = fake(repo);
+    const run = runJob(options(repo, executor).options, { id: ID, feature: "Do X" });
+    await expect(run).rejects.toThrow(join(repo, "fabrica.yaml"));
+    await expect(run).rejects.toThrow("providers.p.region");
+    expect(calls).toHaveLength(0);
+    expect(existsSync(folder(repo))).toBe(false);
+  });
+
+  it("ships a fabrica.example.yaml at the repo root that parses", () => {
+    const content = readFileSync(new URL("../../../fabrica.example.yaml", import.meta.url), "utf8");
+    const config = parseFabricaConfig(content);
+    expect(Object.values(config.providers).map((p) => p.type).sort()).toEqual([
+      "anthropic",
+      "anthropic-compatible",
+      "bedrock",
+      "vertex",
+    ]);
   });
 });
