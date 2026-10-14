@@ -15,7 +15,7 @@ factory/                         local factory runtime: backlog.md, dashboard.ht
 docs/ROADMAP.md                  product plan and architecture
 packages/core/                   @fabrica/core: types and pure logic (no I/O)
                                  (job state types, first-line contract parsers, agent file parsing from contents with a tool allowlist,
-                                 fabrica.yaml provider config parsing from contents,
+                                 fabrica.yaml provider and setup config parsing from contents,
                                  orchestrator state machine: transition(state, event) → actions for a runner, plus prompts and ports)
 apps/                            runnable apps (runner, cli) as they are added
 apps/runner/                     @fabrica/runner: the local runner that executes core's actions on the host (git worktrees, Agent SDK agents, job.json),
@@ -97,8 +97,13 @@ branch sends the job to needs-human.
 Run it from inside the target repo (the repo is `git rev-parse --show-toplevel`
 of the current directory) as `node <fabrica>/apps/cli/bin/fabrica.js <command>`,
 or as `fabrica <command>` once linked, for example with
-`pnpm --filter @fabrica/cli link --global`. The CLI runs no setup command in new
-worktrees: dependencies are not installed there, unlike `SKILL.md` step 2.
+`pnpm --filter @fabrica/cli link --global`.
+
+Like `SKILL.md` step 2, the runner can set up each new worktree: `setup` in
+`fabrica.yaml` in the main checkout (see Worktree setup) is one argv list,
+run once in the job's worktree right after it is created, before the
+spec-writer. Without it nothing runs. A failing setup sends the job to
+needs-human, with the command's output in the note.
 
 ## Dev server
 
@@ -162,10 +167,16 @@ FABRICA_RUNNER_MODE=docker fabrica run <feature...>
 ```
 
 A job's container (`fabrica-<hash of the job folder>-<job-id>`) is created on
-its first agent call from `fabrica/job`, idles, and runs each call as
-`docker exec ... node /opt/fabrica/agent.mjs`. It runs as the host user's
-uid:gid, without `--privileged`. Only the orchestrator's agent calls move into
-it: worktrees, merges and job.json stay on the host.
+its first agent call (or setup command) from `fabrica/job`, idles, and runs
+each call as `docker exec ... node /opt/fabrica/agent.mjs`. It runs as the
+host user's uid:gid, without `--privileged`. Only the orchestrator's agent
+calls and the worktree setup command move into it: worktree creation, merges
+and job.json stay on the host.
+
+The `fabrica.yaml` `setup` command runs in the job's container right after the
+host creates the worktree, as `docker exec` of the argv in the worktree, so
+native dependencies are built for the container's Linux. It gets an empty
+exec env: no host variable, no provider credentials and no git identity.
 
 Mounts, each at the same path as on the host, and nothing else (no rest of
 the main checkout, no home directory, `~/.claude`, `~/.gitconfig` or Docker
@@ -245,6 +256,23 @@ chain, GCP ADC) come from the runner's environment, never from the file.
 An `anthropic-compatible` gateway receives the runner's `ANTHROPIC_API_KEY` /
 `ANTHROPIC_AUTH_TOKEN`, so its `base_url` must be `https:` (plain `http:` only
 for `localhost`, `127.0.0.1` or `[::1]`) and may not contain `user:pass@`.
+
+### Worktree setup
+
+`setup` in the same `fabrica.yaml` (main checkout only) is the command run
+once in each new job worktree, for example to install dependencies. It is one
+argv list, command then arguments, never passed to a shell (no `&&` chains):
+
+```yaml
+setup: [pnpm, install, --frozen-lockfile]
+```
+
+In host mode it runs on the host in the worktree with the runner's env; in
+Docker mode it runs in the job's container (see Runner modes). It runs again
+when a worker resumes a job at worktree creation. If it fails, or cannot
+start, the job goes to needs-human with the command's stdout and stderr in
+the note, and no agent runs; a job run with `--push` has its branch pushed as
+for any other needs-human handoff.
 
 ## Conventions
 
