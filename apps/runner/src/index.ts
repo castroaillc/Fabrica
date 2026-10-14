@@ -10,3 +10,13 @@ export type { JobMessage, JobQueue, QueueConfig, Worker } from "./queue.js";
 export type { AgentCall, AgentExecutor } from "./executor.js";
 export { sdkExecutor } from "./sdk.js";
 export { sdkQueryOptions } from "./sdkOptions.js";
+export { dockerExecutor, dockerLauncher } from "./docker.js";
+export type {
+  ContainerLauncher,
+  ContainerSpec,
+  DockerConfig,
+  DockerMode,
+  ExecRequest,
+  ExecResult,
+  Mount,
+} from "./docker.js";
