@@ -20,12 +20,19 @@ packages/core/                   @fabrica/core: types and pure logic (no I/O)
 apps/                            runnable apps (runner, cli) as they are added
 apps/runner/                     @fabrica/runner: the local runner that executes core's actions on the host (git worktrees, Agent SDK agents, job.json)
 apps/cli/                        @fabrica/cli: the fabrica command (run, next, approve, rework, status) driving apps/runner, run from sources through tsx
+apps/web/                        @fabrica/web: Next.js web app (Carbon, Better Auth, Drizzle on Postgres); the dashboard shows placeholder jobs
+turbo.json                       Turborepo tasks (build, dev, typecheck, clean) run by the root scripts
+docker-compose.yml               dev Postgres 17 for apps/web (user, password and database `fabrica`)
 ```
 
 - `packages/*` and `apps/*` are pnpm workspace packages. Each has a
   `package.json` named `@fabrica/<name>` with `"type": "module"` and
   `"exports": { ".": "./src/index.ts" }`. Source lives in `src/`, tests sit
   next to the code as `*.test.ts`.
+- `apps/web` is the exception: it is a Next.js app with `app/`, `components/`
+  and `lib/` at the package root, no `src/` and no `exports`. It has its own
+  `tsconfig.json` and TypeScript version, and is typechecked through turbo,
+  not by the root tsconfig.
 - `packages/core` stays pure: no filesystem, network, process or git access.
   I/O lives in `apps/`.
 - When porting behaviour from `SKILL.md`, keep its names (stages, `MAX_RESUMES`,
@@ -43,9 +50,10 @@ pnpm install
 ## Validation
 
 ```bash
-pnpm typecheck   # tsc --noEmit over packages/*/src and apps/*/src
+pnpm typecheck   # tsc --noEmit over packages/*/src and apps/*/src, then turbo run typecheck (apps/web: next typegen && tsc --noEmit)
 pnpm test        # vitest run
 pnpm check       # both; must pass before every commit
+pnpm build       # turbo run build (next build for apps/web; needs apps/web/.env, see Dev server)
 ```
 
 There is no linter or formatter yet; match the surrounding style (2-space
@@ -71,9 +79,20 @@ worktrees: dependencies are not installed there, unlike `SKILL.md` step 2.
 
 ## Dev server
 
-None yet. There are no pages to look at, so there is nothing for
-`agent-browser` to check. `factory/dashboard.html` is the existing static
-board (`cd factory && python3 -m http.server`).
+The web app in `apps/web` needs Postgres (Docker) and an `.env`:
+
+1. `docker compose up -d` (Postgres 17 on localhost:5432)
+2. `cp apps/web/.env.example apps/web/.env` and set `BETTER_AUTH_SECRET`
+   (for example with `openssl rand -base64 32`)
+3. `pnpm --filter @fabrica/web db:migrate`
+4. `pnpm --filter @fabrica/web dev`, which serves on port 3000. For another
+   port run `pnpm --filter @fabrica/web exec next dev --port <port>` and set
+   `BETTER_AUTH_URL` in `apps/web/.env` to `http://localhost:<port>` to match.
+
+Pages can now be checked with `agent-browser`: `/` (welcome), `/sign-in`
+(email and password; "New here?" switches to sign-up) and `/dashboard`
+(signed-in only, redirects to `/sign-in`). `factory/dashboard.html` is still
+the static factory board (`cd factory && python3 -m http.server`).
 
 ## Model providers
 
