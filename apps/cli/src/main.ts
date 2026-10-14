@@ -19,6 +19,10 @@ import type { AgentExecutor, JobStore, RunnerOptions } from "@fabrica/runner";
 export interface CliDeps {
   cwd: string;
   executor: AgentExecutor;
+  // Docker mode: removes a job's container once its worktree is removed. Host mode has none.
+  teardown?: (repo: string, id: string) => Promise<void>;
+  // Docker mode: host git runs with fsmonitor and hooks off, since agents can write the repo's git dir.
+  hardenGit?: boolean;
   out: (line: string) => void;
   err: (line: string) => void;
   // DATABASE_URL: when set, run and next enqueue for a worker, and approve and rework keep the job store in step.
@@ -133,6 +137,9 @@ async function withRepo(deps: CliDeps, command: (options: RunnerOptions) => Prom
     return 1;
   }
   const options: RunnerOptions = { repo, executor: deps.executor, notify: (message) => deps.out(message) };
+  const teardown = deps.teardown;
+  if (teardown !== undefined) options.teardown = (id) => teardown(repo, id);
+  if (deps.hardenGit) options.hardenGit = true;
   try {
     const job = await command(options);
     if (job !== null) deps.out(`${job.id}: ${job.stage}`);

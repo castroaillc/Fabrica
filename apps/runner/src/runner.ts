@@ -36,6 +36,11 @@ export interface RunnerOptions {
   setup?: string[];
   // When set, drive saves the state and in-flight actions after every step, and builder session ids as they arrive.
   store?: JobStore;
+  // Called after a successful removeWorktree, for example to remove the job's container in Docker mode.
+  teardown?: (id: string) => Promise<void>;
+  // Docker mode: agents can write parts of the repo's git dir, so host git runs with fsmonitor and hooks turned off
+  // and with the main checkout's .git as its common dir.
+  hardenGit?: boolean;
 }
 
 interface Context {
@@ -152,12 +157,12 @@ function requireStore(options: RunnerOptions): JobStore {
 
 // A push remote must be a remote name configured in the main checkout, never a URL or an option.
 async function checkRemote(ctx: Context, remote: string | undefined): Promise<void> {
-  if (remote !== undefined && !(await remotes(ctx.repo)).includes(remote)) throw new Error(`no remote named ${remote}`);
+  if (remote !== undefined && !(await remotes(ctx)).includes(remote)) throw new Error(`no remote named ${remote}`);
 }
 
-async function remotes(repo: string): Promise<string[]> {
-  const list = await git(["remote"], repo);
-  if (!list.ok) throw new Error(`git remote failed in ${repo}: ${list.error}`);
+async function remotes(ctx: Context): Promise<string[]> {
+  const list = await hostGit(ctx.options, ["remote"], ctx.repo);
+  if (!list.ok) throw new Error(`git remote failed in ${ctx.repo}: ${list.error}`);
   return list.stdout.split("\n").filter((name) => name !== "");
 }
 
@@ -342,31 +347,43 @@ async function execute(
         track(running, action, Promise.resolve(await checkMainCheckout(ctx)));
         break;
       case "merge": {
-        const merge = await git(["merge", "--no-ff", "-m", action.message, "--end-of-options", action.branch], repo);
+        const mergeHead = ["rev-parse", "-q", "--verify", "--end-of-options", "MERGE_HEAD"];
+        const merge = await hostGit(
+          options,
+          ["merge", "--no-ff", "-m", action.message, "--end-of-options", action.branch],
+          repo,
+        );
         const event: OrchestratorEvent = merge.ok
           ? { type: "mergeDone", ok: true }
           : {
               type: "mergeDone",
               ok: false,
               error: merge.error,
-              inProgress: (await git(["rev-parse", "-q", "--verify", "--end-of-options", "MERGE_HEAD"], repo)).ok,
+              inProgress: (await hostGit(options, mergeHead, repo)).ok,
             };
         track(running, action, Promise.resolve(event));
         break;
       }
       case "abortMerge": {
-        const abort = await git(["merge", "--abort"], repo);
+        const abort = await hostGit(options, ["merge", "--abort"], repo);
         if (!abort.ok) options.notify(`${id}: git merge --abort failed: ${abort.error}`);
         break;
       }
       case "removeWorktree": {
-        const remove = await git(["worktree", "remove", "--end-of-options", action.worktree], repo);
+        const remove = await hostGit(options, ["worktree", "remove", "--end-of-options", action.worktree], repo);
         const output = remove.ok ? `${remove.stdout}${remove.stderr}`.trim() : remove.error;
+        if (remove.ok && options.teardown !== undefined) {
+          try {
+            await options.teardown(id);
+          } catch (error) {
+            options.notify(`${id}: teardown failed: ${errorMessage(error)}`);
+          }
+        }
         track(running, action, Promise.resolve({ type: "worktreeRemoved", ok: remove.ok, output }));
         break;
       }
       case "deleteBranch": {
-        const remove = await git(["branch", "-d", "--end-of-options", action.branch], repo);
+        const remove = await hostGit(options, ["branch", "-d", "--end-of-options", action.branch], repo);
         if (!remove.ok) options.notify(`${id}: git branch -d ${action.branch} failed: ${remove.error}`);
         break;
       }
@@ -392,9 +409,11 @@ function definition(ctx: Context, agent: AgentName): AgentDefinition {
   return found;
 }
 
-// A call with the agent's definition, plus its provider and model when fabrica.yaml lists its role.
+// A call with the agent's definition, the job's id and folder, plus its provider and model when fabrica.yaml lists
+// its role.
 function agentCall(ctx: Context, agent: AgentName, prompt: string, cwd: string): AgentCall {
-  return { agent: definition(ctx, agent), prompt, cwd, ...ctx.roles.get(agent) };
+  const folder = jobFolder(ctx.repo, ctx.id);
+  return { agent: definition(ctx, agent), prompt, cwd, jobId: ctx.id, jobFolder: folder, ...ctx.roles.get(agent) };
 }
 
 // The file each agent writes in the job folder. A reviewer's round is the round it was spawned in.
@@ -437,8 +456,12 @@ async function callAgent(
 }
 
 async function createWorktree(ctx: Context, branch: string, worktree: string): Promise<OrchestratorEvent> {
-  if (!(ctx.resumed && (await hasWorktree(ctx.repo, branch, worktree)))) {
-    const add = await git(["worktree", "add", "-b", branch, "--end-of-options", worktree, "main"], ctx.repo);
+  if (!(ctx.resumed && (await hasWorktree(ctx, branch, worktree)))) {
+    const add = await hostGit(
+      ctx.options,
+      ["worktree", "add", "-b", branch, "--end-of-options", worktree, "main"],
+      ctx.repo,
+    );
     if (!add.ok) return { type: "worktreeCreated", ok: false, error: add.error };
   }
   const [command, ...args] = ctx.options.setup ?? [];
@@ -450,8 +473,8 @@ async function createWorktree(ctx: Context, branch: string, worktree: string): P
 }
 
 // After a restart, a worktree registered at worktree on branch means git worktree add already ran.
-async function hasWorktree(repo: string, branch: string, worktree: string): Promise<boolean> {
-  const list = await git(["worktree", "list", "--porcelain"], repo);
+async function hasWorktree(ctx: Context, branch: string, worktree: string): Promise<boolean> {
+  const list = await hostGit(ctx.options, ["worktree", "list", "--porcelain"], ctx.repo);
   if (!list.ok) return false;
   return list.stdout.split("\n\n").some((block) => {
     const lines = block.split("\n");
@@ -465,17 +488,27 @@ async function pushBranch(ctx: Context, remote: string, branch: string): Promise
   if (branch !== `factory/${id}`) {
     return { type: "pushDone", ok: false, error: `refusing to push ${branch}: only factory/${id} may be pushed` };
   }
-  if (!(await remotes(repo)).includes(remote)) return { type: "pushDone", ok: false, error: `no remote named ${remote}` };
-  const push = await git(["push", "--end-of-options", remote, `refs/heads/${branch}:refs/heads/${branch}`], repo);
+  if (!(await remotes(ctx)).includes(remote)) return { type: "pushDone", ok: false, error: `no remote named ${remote}` };
+  const refspec = `refs/heads/${branch}:refs/heads/${branch}`;
+  const push = await hostGit(ctx.options, ["push", "--end-of-options", remote, refspec], repo);
   return push.ok ? { type: "pushDone", ok: true } : { type: "pushDone", ok: false, error: push.error };
 }
 
 async function checkMainCheckout(ctx: Context): Promise<OrchestratorEvent> {
-  const status = await git(["status", "--porcelain", "--", ".", ":!factory/backlog.md"], ctx.repo);
+  const status = await hostGit(ctx.options, ["status", "--porcelain", "--", ".", ":!factory/backlog.md"], ctx.repo);
   if (!status.ok) throw new Error(`${ctx.id}: git status failed in ${ctx.repo}: ${status.error}`);
-  const branch = await git(["branch", "--show-current"], ctx.repo);
+  const branch = await hostGit(ctx.options, ["branch", "--show-current"], ctx.repo);
   if (!branch.ok) throw new Error(`${ctx.id}: git branch --show-current failed in ${ctx.repo}: ${branch.error}`);
   return { type: "mainCheckout", porcelain: status.stdout, branch: branch.stdout.trim() };
+}
+
+const HARDENED_GIT: readonly string[] = ["-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null"];
+
+// Git passes -c settings and its env on to the git processes it starts, so they cover worktree remove's status check
+// too. GIT_COMMON_DIR overrides any commondir file an agent may have planted in the main checkout's git dir.
+function hostGit(options: RunnerOptions, args: readonly string[], cwd: string) {
+  if (!options.hardenGit) return git(args, cwd);
+  return git([...HARDENED_GIT, ...args], cwd, { GIT_COMMON_DIR: join(cwd, ".git") });
 }
 
 async function readIfExists(file: string): Promise<string | null> {

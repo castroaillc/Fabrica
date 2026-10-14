@@ -5,6 +5,9 @@ export interface AgentCall {
   agent: AgentDefinition;
   prompt: string;
   cwd: string;
+  // The job this call belongs to and its folder, <repo>/factory/jobs/<id>/. sdkQueryOptions ignores both.
+  jobId: string;
+  jobFolder: string;
   resume?: string;
   // Set from the agent's role in fabrica.yaml; left out for roles it doesn't list.
   provider?: ProviderConfig;

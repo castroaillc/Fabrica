@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -206,6 +206,8 @@ describe("runJob", () => {
       expect(call.agent.tools).toEqual(parsed.tools);
       expect(call.agent.model).toBe(parsed.model);
       expect(call.cwd).toBe(worktreeOf(repo));
+      expect(call.jobId).toBe(ID);
+      expect(call.jobFolder).toBe(folder(repo));
       expect(call.resume).toBeUndefined();
     }
   });
@@ -382,6 +384,94 @@ describe("runJob", () => {
     const job = await runJob(opts, { id: ID, feature: "Do X" });
     expect(notes.some((n) => n.includes("spec-writer failed: model overloaded"))).toBe(true);
     expect(job.stage).toBe("merged");
+  });
+
+  it("calls teardown once, after the worktree is removed", async () => {
+    const repo = makeRepo();
+    const { executor } = fake(repo);
+    const torn: { id: string; worktree: boolean }[] = [];
+    const teardown = async (id: string) => {
+      torn.push({ id, worktree: existsSync(worktreeOf(repo)) });
+    };
+    const job = await runJob(options(repo, executor, { teardown }).options, { id: ID, feature: "Do X" });
+    expect(job.stage).toBe("merged");
+    expect(torn).toEqual([{ id: ID, worktree: false }]);
+  });
+
+  it("reports a failing teardown through notify without changing the outcome", async () => {
+    const repo = makeRepo();
+    const { executor } = fake(repo);
+    const teardown = async () => {
+      throw new Error("docker rm failed");
+    };
+    const { options: opts, notes } = options(repo, executor, { teardown });
+    const job = await runJob(opts, { id: ID, feature: "Do X" });
+    expect(job.stage).toBe("merged");
+    expect(notes).toContain(`${ID}: teardown failed: docker rm failed`);
+  });
+
+  it("turns off git hooks and fsmonitor for host git with hardenGit, and leaves them on without it", async () => {
+    for (const hardenGit of [true, false]) {
+      const repo = makeRepo();
+      const marks = join(dirname(repo), "marks");
+      // What a container agent could plant in the mounted git dir once it has committed: a hook and an fsmonitor.
+      const script = (name: string) => {
+        const file = join(repo, ".git", "hooks", name);
+        writeFileSync(file, `#!/bin/sh\necho ${name} >> ${marks}\n`, { mode: 0o755 });
+        return file;
+      };
+      const { executor } = fake(repo, {
+        build: () => {
+          script("post-merge");
+          sh(repo, "config", "core.fsmonitor", script("fsmonitor"));
+          return "STATUS: READY\n\n# Build\n";
+        },
+      });
+      const extra = hardenGit ? { hardenGit } : {};
+      const job = await runJob(options(repo, executor, extra).options, { id: ID, feature: "Do X" });
+      expect(job.stage).toBe("merged");
+      const ran = existsSync(marks) ? readFileSync(marks, "utf8") : "";
+      if (hardenGit) expect(ran).toBe("");
+      else for (const name of ["post-merge", "fsmonitor"]) expect(ran).toContain(name);
+    }
+  });
+
+  it("ignores a planted commondir in the main checkout's git dir for host git with hardenGit", async () => {
+    for (const hardenGit of [true, false]) {
+      const repo = makeRepo();
+      const marks = join(dirname(repo), "marks");
+      // A copy of the git dir with a smudge filter on every file, made the common dir through <repo>/.git/commondir.
+      const { executor } = fake(repo, {
+        build: () => {
+          const planted = join(dirname(repo), "planted");
+          cpSync(join(repo, ".git"), planted, { recursive: true });
+          const smudge = join(dirname(repo), "smudge");
+          writeFileSync(smudge, `#!/bin/sh\necho smudge >> ${marks}\ncat\n`, { mode: 0o755 });
+          sh(repo, "config", "--file", join(planted, "config"), "filter.x.smudge", smudge);
+          mkdirSync(join(planted, "info"), { recursive: true });
+          writeFileSync(join(planted, "info", "attributes"), "* filter=x\n");
+          writeFileSync(join(repo, ".git", "commondir"), `${planted}\n`);
+          return "STATUS: READY\n\n# Build\n";
+        },
+      });
+      const extra = hardenGit ? { hardenGit } : {};
+      const job = await runJob(options(repo, executor, extra).options, { id: ID, feature: "Do X" });
+      const ran = existsSync(marks) ? readFileSync(marks, "utf8") : "";
+      if (hardenGit) {
+        expect(job.stage).toBe("merged");
+        expect(ran).toBe("");
+      } else expect(ran).toContain("smudge");
+    }
+  });
+
+  it("runs no teardown in host mode, where there is no hook", async () => {
+    const repo = makeRepo();
+    const { executor } = fake(repo);
+    const { options: opts, notes } = options(repo, executor);
+    const job = await runJob(opts, { id: ID, feature: "Do X" });
+    expect("teardown" in opts).toBe(false);
+    expect(job.stage).toBe("merged");
+    expect(notes.some((n) => n.includes("teardown"))).toBe(false);
   });
 });
 
@@ -811,6 +901,27 @@ describe("push", () => {
     expect(sh(repo, "branch", "--list", `factory/${ID}`)).toContain(`factory/${ID}`);
     expect(notes).toContain(`${ID}: approved → pushing factory/${ID} to origin`);
     expect(notes.at(-1)).toBe(`${ID}: pushed factory/${ID} to origin`);
+  });
+
+  it("pushes without running a planted pre-push hook with hardenGit", async () => {
+    const repo = makeRepo();
+    const bare = bareRemote(repo);
+    const marks = join(dirname(repo), "marks");
+    const { executor } = fake(repo, {
+      build: () => {
+        const hook = join(repo, ".git", "hooks", "pre-push");
+        writeFileSync(hook, `#!/bin/sh\necho pre-push >> ${marks}\n`, { mode: 0o755 });
+        return "STATUS: READY\n\n# Build\n";
+      },
+    });
+    const job = await runJob(options(repo, executor, { hardenGit: true }).options, {
+      id: ID,
+      feature: "Do X",
+      push: "origin",
+    });
+    expect(job.stage).toBe("pushed");
+    expect(refs(bare)).toEqual([`refs/heads/factory/${ID}`]);
+    expect(existsSync(marks)).toBe(false);
   });
 
   it("writes push into job.json after reviews only when it is given", async () => {
